@@ -1,0 +1,410 @@
+use doze_bworser_mcp::{
+    browser::Manager,
+    server::{Config, application},
+};
+use reqwest::Client;
+use serde_json::{Value, json};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+struct Service {
+    base: String,
+    token: String,
+    manager: Arc<Manager>,
+    cancel: CancellationToken,
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+impl Service {
+    async fn start(chrome: PathBuf, seconds: u64) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "test-token-that-is-long-enough-for-local-tests".to_string();
+        let manager = Arc::new(Manager::new(chrome.clone(), Duration::from_secs(seconds)));
+        let cancel = CancellationToken::new();
+        let app = application(
+            Config {
+                port,
+                token: token.clone(),
+                chrome_path: chrome,
+                operation_timeout_seconds: seconds,
+            },
+            manager.clone(),
+            cancel.clone(),
+        );
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        Self {
+            base: format!("http://127.0.0.1:{port}"),
+            token,
+            manager,
+            cancel,
+        }
+    }
+    async fn caller(&self, thread: &str) -> Mcp {
+        let client = Client::new();
+        let response=client.post(format!("{}/mcp",self.base)).bearer_auth(&self.token)
+            .header("accept","application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}))
+            .send().await.unwrap();
+        assert!(
+            response.status().is_success(),
+            "initialize: {:?}",
+            response.status()
+        );
+        let session = response
+            .headers()
+            .get("mcp-session-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = response_json(response).await;
+        assert!(body.get("error").is_none(), "{body}");
+        assert_eq!(body["result"]["serverInfo"]["name"], "doze-bworser-mcp");
+        let mcp = Mcp {
+            client,
+            base: self.base.clone(),
+            token: self.token.clone(),
+            session,
+            thread: thread.into(),
+            parent: None,
+            next: AtomicU64::new(2),
+        };
+        mcp.client
+            .post(format!("{}/mcp", mcp.base))
+            .bearer_auth(&mcp.token)
+            .header("mcp-session-id", &mcp.session)
+            .header("mcp-protocol-version", "2025-11-25")
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .send()
+            .await
+            .unwrap();
+        mcp
+    }
+}
+struct Mcp {
+    client: Client,
+    base: String,
+    token: String,
+    session: String,
+    thread: String,
+    parent: Option<String>,
+    next: AtomicU64,
+}
+impl Mcp {
+    async fn rpc(&self, method: &str, mut params: Value) -> Value {
+        let source = match &self.parent {
+            Some(parent) => json!({"subagent":{"thread_spawn":{"parent_thread_id":parent}}}),
+            None => json!("cli"),
+        };
+        params["_meta"] = json!({"x-codex-turn-metadata":json!({"thread_id":self.thread,"thread_source":source}).to_string()});
+        let response=self.client.post(format!("{}/mcp",self.base)).bearer_auth(&self.token)
+            .header("mcp-session-id",&self.session).header("mcp-protocol-version","2025-11-25")
+            .header("accept","application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":self.next.fetch_add(1,Ordering::Relaxed),"method":method,"params":params}))
+            .send().await.unwrap();
+        assert!(
+            response.status().is_success(),
+            "HTTP {}: {}",
+            response.status(),
+            response.text().await.unwrap()
+        );
+        let body = response_json(response).await;
+        assert!(body.get("error").is_none(), "{body}");
+        body["result"].clone()
+    }
+    async fn tool(&self, name: &str, args: Value) -> Value {
+        self.rpc("tools/call", json!({"name":name,"arguments":args}))
+            .await
+    }
+    async fn ok(&self, name: &str, args: Value) -> Value {
+        let result = self.tool(name, args).await;
+        assert_ne!(result["isError"], true, "{name}: {result}");
+        result["structuredContent"].clone()
+    }
+    async fn finish(&self) {
+        let response = self
+            .client
+            .delete(format!("{}/mcp", self.base))
+            .bearer_auth(&self.token)
+            .header("mcp-session-id", &self.session)
+            .header("mcp-protocol-version", "2025-11-25")
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+}
+
+#[tokio::test]
+async fn discovery_is_cold_and_http_access_is_scoped() {
+    let service = Service::start("/missing/chrome".into(), 2).await;
+    let caller = service.caller("thread-a").await;
+    let tools = caller.rpc("tools/list", json!({})).await;
+    assert_eq!(tools["tools"].as_array().unwrap().len(), 13);
+    assert_eq!(
+        caller.ok("list_pages", json!({})).await,
+        json!({"pages":[]})
+    );
+    assert_eq!(service.manager.status().await["browser_count"], 0);
+    assert_eq!(
+        Client::new()
+            .get(format!("{}/health", service.base))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        Client::new()
+            .get(format!("{}/health", service.base))
+            .bearer_auth(&service.token)
+            .header("origin", "https://other.example")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    caller.finish().await;
+}
+
+async fn response_json(response: reqwest::Response) -> Value {
+    let event_stream = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/event-stream");
+    let text = response.text().await.unwrap();
+    let json = if event_stream {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .next_back()
+            .unwrap_or("")
+    } else {
+        &text
+    };
+    serde_json::from_str(json).unwrap_or_else(|error| panic!("{error}: {text}"))
+}
+
+async fn fixture() -> (String, CancellationToken) {
+    use axum::{Router, response::Html, routing::get};
+    let app=Router::new().route("/",get(||async {Html("<title>Fixture</title><h1>Browser fixture</h1><input aria-label='Name'><button onclick=\"document.querySelector('h1').textContent='Clicked'\">Apply</button>" )}))
+        .route("/slow",get(||async {tokio::time::sleep(Duration::from_millis(1200)).await;Html("<title>Slow fixture</title><h1>Ready</h1>")}));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    (format!("http://127.0.0.1:{port}/"), cancel)
+}
+
+/// Run explicitly with DOZE_BROWSER_CHROME pointing to a dedicated Chrome for Testing.
+#[tokio::test]
+#[ignore = "launches the explicitly configured dedicated headless Chrome for Testing"]
+async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
+    let chrome = std::env::var_os("DOZE_BROWSER_CHROME").expect("Set DOZE_BROWSER_CHROME");
+    let service = Service::start(PathBuf::from(chrome), 5).await;
+    let (url, fixture_stop) = fixture().await;
+    let a = Arc::new(service.caller("thread-a").await);
+    let b = service.caller("thread-b").await;
+    let opened = a.ok("open_page", json!({"url":url})).await;
+    let pa = opened["page_id"].as_str().unwrap().to_string();
+    let opened = b.ok("open_page", json!({"url":url})).await;
+    let pb = opened["page_id"].as_str().unwrap().to_string();
+    assert_eq!(service.manager.status().await["browser_count"], 1);
+    assert_eq!(
+        a.ok("list_pages", json!({})).await["pages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        b.tool(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"document.title"})
+        )
+        .await["isError"],
+        true
+    );
+    a.ok("evaluate_script",json!({"page_id":pa,"expression":"localStorage.setItem('private','a');document.cookie='private=a';true"})).await;
+    assert_eq!(b.ok("evaluate_script",json!({"page_id":pb,"expression":"({storage:localStorage.getItem('private'),cookie:document.cookie})"})).await,json!({"storage":null,"cookie":""}));
+    let slow = {
+        let a = a.clone();
+        let url = format!("{url}slow");
+        tokio::spawn(async move { a.ok("open_page", json!({"url":url})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let start = Instant::now();
+    assert_eq!(
+        b.ok("evaluate_script", json!({"page_id":pb,"expression":"6*7"}))
+            .await,
+        42
+    );
+    assert!(
+        start.elapsed() < Duration::from_millis(800),
+        "slow navigation blocked an unrelated page"
+    );
+    let slow = slow.await.unwrap();
+    a.ok("close_page", json!({"page_id":slow["page_id"]})).await;
+    let mut child = service.caller("worker-a").await;
+    child.parent = Some("thread-a".into());
+    let pc = child.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    assert_eq!(
+        child
+            .ok(
+                "evaluate_script",
+                json!({"page_id":pc,"expression":"localStorage.getItem('private')"})
+            )
+            .await,
+        "a"
+    );
+    assert_eq!(
+        child.tool("inspect_page", json!({"page_id":pa})).await["isError"],
+        true
+    );
+    let work = {
+        let a = a.clone();
+        let pa = pa.clone();
+        tokio::spawn(async move {
+            a.ok("evaluate_script",json!({"page_id":pa,"expression":"new Promise(r=>setTimeout(()=>{globalThis.finished=true;r(true)},400))"})).await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"globalThis.finished"})
+        )
+        .await,
+        true
+    );
+    work.await.unwrap();
+    let snapshot = a.ok("inspect_page", json!({"page_id":pa})).await;
+    let elements = snapshot["elements"].as_array().unwrap();
+    let input = elements.iter().find(|e| e["name"] == "Name").unwrap()["element"].clone();
+    let button = elements.iter().find(|e| e["name"] == "Apply").unwrap()["element"].clone();
+    a.ok(
+        "fill",
+        json!({"page_id":pa,"element":input,"value":"Example"}),
+    )
+    .await;
+    a.ok("click", json!({"page_id":pa,"element":button})).await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"document.querySelector('h1').textContent"})
+        )
+        .await,
+        "Clicked"
+    );
+    a.ok("evaluate_script",json!({"page_id":pa,"expression":"document.querySelector('button').onclick=()=>{document.querySelector('h1').textContent=confirm('Continue?')?'Confirmed':'Dismissed'};true"})).await;
+    let dialog = a.ok("click", json!({"page_id":pa,"element":button})).await;
+    assert_eq!(dialog["action_completed"], false);
+    assert_eq!(dialog["dialog"]["type"], "confirm");
+    a.ok("handle_dialog", json!({"page_id":pa,"accept":true}))
+        .await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"document.querySelector('h1').textContent"})
+        )
+        .await,
+        "Confirmed"
+    );
+    let screenshot = a.tool("take_screenshot", json!({"page_id":pa})).await;
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(screenshot["content"][0]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    std::fs::create_dir_all("tmp").unwrap();
+    std::fs::write("tmp/browser-fixture.png", png).unwrap();
+    a.finish().await;
+    for _ in 0..50 {
+        if service.manager.status().await["page_count"] == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(service.manager.status().await["page_count"], 2);
+    service.manager.end_thread("thread-a").await.unwrap();
+    assert_eq!(service.manager.status().await["page_count"], 1);
+    child.finish().await;
+    assert_eq!(
+        b.ok(
+            "evaluate_script",
+            json!({"page_id":pb,"expression":"document.title"})
+        )
+        .await,
+        "Fixture"
+    );
+    b.ok("close_page", json!({"page_id":pb})).await;
+    assert_eq!(service.manager.status().await["browser_count"], 0);
+    b.finish().await;
+    fixture_stop.cancel();
+    service.manager.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "launches the explicitly configured dedicated headless Chrome for Testing"]
+async fn timed_out_page_is_closed_without_blocking_other_pages() {
+    let chrome = std::env::var_os("DOZE_BROWSER_CHROME").expect("Set DOZE_BROWSER_CHROME");
+    let service = Service::start(PathBuf::from(chrome), 1).await;
+    let (url, stop) = fixture().await;
+    let a = service.caller("timeout-owner").await;
+    let pa = a.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    let pb = a.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    let result = a
+        .tool(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"new Promise(()=>{})"}),
+        )
+        .await;
+    assert_eq!(result["isError"], true);
+    assert!(result.to_string().contains("outcome may be unknown"));
+    assert_eq!(
+        a.ok("list_pages", json!({})).await["pages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        a.ok("evaluate_script", json!({"page_id":pb,"expression":"21*2"}))
+            .await,
+        42
+    );
+    a.ok("close_page", json!({"page_id":pb})).await;
+    a.finish().await;
+    stop.cancel();
+    service.manager.shutdown().await;
+}

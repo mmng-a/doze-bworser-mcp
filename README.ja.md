@@ -1,0 +1,70 @@
+# doze-bworser-mcp
+
+[English](README.md) | [日本語](README.ja.md)
+
+Codexの複数スレッドで、必要な時に起動する1個のChrome for Testingを共有するローカルMCPサービスです。初期化やツール一覧の取得ではブラウザを起動しません。別のタブは並行して処理し、同じタブへの操作は順番に実行します。各呼び出しは処理の完了後に結果を返します。
+
+## 必要なもの
+
+- macOS。ビルドにはRust 1.88以降、インストールにはPython 3.11以降が必要です。
+- 自動操作専用のGoogle Chrome for Testing。利用者の通常のブラウザは自動選択しません。
+- Streamable HTTP接続のMCPを利用できるCodexクライアント。
+
+インストール後はRustの実行ファイル1個で動作します。Node.jsやmcp-dozeは不要です。通常のheadless用ブラウザを全体で1個共有します。明示的な共同操作には、別の画面表示用ブラウザを使います。
+
+## インストール
+
+```sh
+cargo build --release --locked
+python3 scripts/install.py
+```
+
+既定では、既存の専用ブラウザ `~/.local/share/codex-browser/chrome/current/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` を使います。別の専用配置を使う場合は、`~/.config/doze-bworser-mcp/config.json` の `chrome_path` を設定してください。
+
+インストーラーは、LaunchAgent `com.masasam.doze-bworser-mcp`、`~/.codex/config.toml` の認証付きローカルHTTP MCP、開始・終了フックを登録します。サービスはログイン時に起動して待機し、ブラウザ操作を初めて受けた時にChromiumを起動します。既定のポート番号は45917です。アクセストークンを含む個人設定ファイルは公開しないでください。
+
+既存のCodexスレッドではMCP設定の再読込が必要な場合があります。変更したフックは `/hooks` で信頼する必要がある場合があります。無関係な設定は維持し、変更前のCodex設定とフックを個人設定ディレクトリに保存します。従来のcodex-browser開始フックは置き換えますが、既存セッションの後始末用に終了フックを保持します。
+
+## 使い方
+
+更新前には、サービスが管理するタブを閉じてください。インストーラーは使用中のタブがあるサービスを再起動しません。
+
+1. `open_page` にHTTP(S)のURLを渡します。`width`、`height`、`headed` も指定できます。
+2. 返された `page_id` を、以後のすべてのページ操作に渡します。
+3. `inspect_page` で本文と要素の参照IDを取得し、`click` や `fill` に使います。
+4. `take_screenshot` で画像を取得します。案件に正式な撮影・監査CLIがある場合は、正式な成果物の作成にそちらを優先します。
+5. 作業を終えたら `close_page` でタブを閉じます。
+
+利用できるツールは `open_page`、`list_pages`、`inspect_page`、`navigate_page`、`click`、`fill`、`press_key`、`scroll_page`、`set_viewport`、`take_screenshot`、`evaluate_script`、`handle_dialog`、`close_page` です。
+
+`headed: true` は明示された共同操作にだけ使います。自動操作専用のウインドウを開き、利用者の既存ブラウザには接続しません。`set_viewport` はページの表示条件を変更し、利用者のウインドウはリサイズしません。
+
+## 注意点
+
+- CodexのスレッドIDは呼び出し情報から取得し、モデルが入力する引数にはしません。親子の情報と開始・終了フックを使い、関連するスレッドを同じブラウザコンテキストへ対応付けます。コンテキストごとにCookieや保存領域を分離します。
+- 呼び出し元が一覧取得・操作できるのは自分のタブだけです。Codex以外のMCPクライアントは接続単位で分離します。MCP接続を終了すると、その接続のタブを閉じます。別の接続が使っているタブは保持します。親スレッドの終了時には、その親と子の管理対象を閉じます。
+- 最後のタブを閉じると、対応する専用ブラウザを停止します。待機するMCPサービスは残ります。
+- ページ移動はDOMの準備完了まで待ち、終わらない通信の終了は待ちません。入力操作の成功は、外部処理の成功まで保証しません。必要な結果を操作後の画面で確認してください。
+- 要素の参照IDは `inspect_page` の再実行で更新し、ページ移動で失効します。入力欄の値は確認結果に含めません。
+- JavaScriptのダイアログが開いた場合は、応答にダイアログの情報を返します。元の操作を繰り返さず、`handle_dialog` で応答してから結果を確認してください。
+- 順番待ちと実行の制限時間は、それぞれ既定で20秒です。順番待ちで時間切れになった要求は実行しません。実行中の時間切れやキャンセルでは、結果が不明なタブに操作を重ねないよう、そのタブを閉じます。外部への変更がすでに起きた可能性は残ります。自動で再実行しません。
+- ブラウザが異常終了すると、そのブラウザのページは失われます。古いページIDを別のページへ割り当て直しません。
+- 接続先は `127.0.0.1` に限定し、Bearer認証とHost・Originの検証を行います。サービスは自身のOS権限で動作します。MCPにしても、OSの権限やCodexのツール承認はなくなりません。
+- 終了処理の対象は、自分で起動した専用ブラウザと一時プロファイルです。
+
+## 検証
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+DOZE_BROWSER_CHROME='/専用のChrome for Testing実行ファイルの絶対パス' cargo test --locked --test service -- --ignored --test-threads=1
+```
+
+実ブラウザの検証には、ローカルの検証用ページと専用headlessブラウザを使います。共有起動、Cookie・保存領域の分離、タブの所有者、移動中の別タブ操作、同じタブの実行順序、入力、画像出力、接続終了・時間切れ時の後始末を確認します。
+
+CIはpushとプルリクエストで、整形、Clippy、通常のテストを実行します。実ブラウザの検証は明示的に実行します。自動デプロイ・リリースはありません。別の指定がない開発では現在のブランチを使います。
+
+## ライセンス
+
+MIT。
