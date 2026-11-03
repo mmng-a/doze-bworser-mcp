@@ -100,14 +100,12 @@ impl ServerHandler for BrowserService {
                         .open(
                             &caller,
                             args["url"].as_str().context("url must be a string")?,
-                            args["width"].as_u64().unwrap_or(1440),
-                            args["height"].as_u64().unwrap_or(900),
                             args["headed"].as_bool().unwrap_or(false),
                             context.ct.clone(),
                         )
                         .await
                 }
-                "list_pages" => Ok(manager.list(&caller).await),
+                "list_pages" => manager.list(&caller).await,
                 "close_page" => {
                     manager
                         .close(
@@ -139,10 +137,15 @@ impl ServerHandler for BrowserService {
                 )])
             }
             Ok(value) => {
-                let mut result =
-                    CallToolResult::success(vec![ContentBlock::text(value.to_string())]);
-                result.structured_content = Some(value);
-                result
+                let text = if name == "evaluate_script" {
+                    value.to_string()
+                } else {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string())
+                };
+                CallToolResult::success(vec![ContentBlock::text(text)])
             }
             Err(error) => failure(error),
         };
@@ -162,7 +165,7 @@ fn catalog() -> Vec<Tool> {
         (
             "open_page",
             "Open a dedicated page. Browser starts only when needed; url must be http(s) or about:blank. headed requires explicit joint viewing.",
-            json!({"url":string,"width":integer,"height":integer,"headed":{"type":"boolean"}}),
+            json!({"url":string,"headed":{"type":"boolean"}}),
             vec!["url"],
             false,
             false,
@@ -177,7 +180,7 @@ fn catalog() -> Vec<Tool> {
         ),
         (
             "inspect_page",
-            "Read page text and visible controls. Returns new element references; omits input values.",
+            "Read the Chromium accessibility tree as DevTools-style text. Pass a uid to click or fill as element; references are refreshed on each inspection.",
             page.clone(),
             vec!["page_id"],
             true,

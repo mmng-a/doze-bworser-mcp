@@ -31,9 +31,9 @@ Existing Codex threads may need their MCP configuration reloaded. Newly changed 
 
 Before updating the installed service, close its managed pages. The installer refuses to restart a service with active pages.
 
-1. Call `open_page` with an HTTP(S) URL and optional `width`, `height` and `headed` settings.
+1. Call `open_page` with an HTTP(S) URL and optional `headed: true` for explicit joint viewing.
 2. Pass the returned `page_id` to every page operation.
-3. Use `inspect_page` to get page text and element references for `click` and `fill`.
+3. Use `inspect_page` to read the DevTools-style accessibility tree. Pass a displayed `uid` as `element` to `click` or `fill`.
 4. Use `take_screenshot` to receive an image. Project-provided capture and audit CLIs remain the preferred way to produce their formal artifacts.
 5. Call `close_page` when finished.
 
@@ -41,11 +41,15 @@ Tools: `open_page`, `list_pages`, `inspect_page`, `navigate_page`, `click`, `fil
 
 `headed: true` is only for explicit joint viewing. It opens an automation-owned window and does not attach to a user's existing browser. `set_viewport` changes page emulation, not the user window size.
 
+Results use MCP `content` only: `open_page` returns `page_id`; `list_pages` returns an array of IDs, URLs and titles; `inspect_page` returns text; `take_screenshot` returns an image; `evaluate_script` returns its JSON result; other operations return `OK`. Pages start at 1440×900; use `set_viewport` to change the size.
+
+Inspection uses Chromium's main-frame accessibility tree and DevTools' `uid`, role, name, attribute and indentation notation.
+
 ## Ownership and completion
 
 Codex thread identity comes from request metadata, not model-provided arguments. Parent/child metadata and lifecycle hooks associate related threads with one isolated browser context. Each caller can list and operate only its own pages. A non-Codex MCP client is scoped to its MCP connection. Closing an MCP connection removes that connection's pages, leaving other connections in use. Ending a parent thread closes that parent's managed pages and those of its children. Closing the final page stops the corresponding dedicated browser.
 
-Navigation completes at DOM readiness, rather than waiting for all background traffic. Input operations report action completion, not proof of a downstream business result. Inspect the resulting page to verify that result. Element references are refreshed by `inspect_page` and expire on navigation. Input values are not included in inspection output.
+Navigation completes at DOM readiness, rather than waiting for all background traffic. Input operations report action completion, not proof of a downstream business result. Inspect the resulting page to verify that result. Element references are refreshed by `inspect_page` and expire on navigation. The accessibility tree includes input values and states exposed by Chromium.
 
 Pages idle for at least 30 minutes are closed periodically. Operations in progress are excluded. A closed page returns an error asking you to open a new page.
 

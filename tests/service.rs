@@ -139,7 +139,10 @@ impl Mcp {
     async fn ok(&self, name: &str, args: Value) -> Value {
         let result = self.tool(name, args).await;
         assert_ne!(result["isError"], true, "{name}: {result}");
-        result["structuredContent"].clone()
+        assert!(result.get("structuredContent").is_none());
+        assert_eq!(result["content"].as_array().unwrap().len(), 1);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap_or_else(|_| json!(text))
     }
     async fn finish(&self) {
         let response = self
@@ -161,10 +164,17 @@ async fn discovery_is_cold_and_http_access_is_scoped() {
     let caller = service.caller("thread-a").await;
     let tools = caller.rpc("tools/list", json!({})).await;
     assert_eq!(tools["tools"].as_array().unwrap().len(), 13);
+    let open = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "open_page")
+        .unwrap();
     assert_eq!(
-        caller.ok("list_pages", json!({})).await,
-        json!({"pages":[]})
+        open["inputSchema"]["properties"].as_object().unwrap().len(),
+        2
     );
+    assert_eq!(caller.ok("list_pages", json!({})).await, json!([]));
     assert_eq!(service.manager.status().await["browser_count"], 0);
     assert_eq!(
         Client::new()
@@ -236,12 +246,14 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
     let a = Arc::new(service.caller("thread-a").await);
     let b = service.caller("thread-b").await;
     let opened = a.ok("open_page", json!({"url":url})).await;
+    assert_eq!(opened.as_object().unwrap().len(), 1);
     let pa = opened["page_id"].as_str().unwrap().to_string();
     let opened = b.ok("open_page", json!({"url":url})).await;
     let pb = opened["page_id"].as_str().unwrap().to_string();
     assert_eq!(service.manager.status().await["browser_count"], 1);
     assert_eq!(
-        a.ok("list_pages", json!({})).await["pages"]
+        a.ok("list_pages", json!({}))
+            .await
             .as_array()
             .unwrap()
             .len(),
@@ -309,14 +321,31 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
     );
     work.await.unwrap();
     let snapshot = a.ok("inspect_page", json!({"page_id":pa})).await;
-    let elements = snapshot["elements"].as_array().unwrap();
-    let input = elements.iter().find(|e| e["name"] == "Name").unwrap()["element"].clone();
-    let button = elements.iter().find(|e| e["name"] == "Apply").unwrap()["element"].clone();
-    a.ok(
-        "fill",
-        json!({"page_id":pa,"element":input,"value":"Example"}),
-    )
-    .await;
+    let snapshot = snapshot.as_str().unwrap();
+    assert!(snapshot.contains("RootWebArea \"Fixture\""));
+    assert!(snapshot.contains("heading \"Browser fixture\""));
+    let reference = |name: &str| {
+        snapshot
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .strip_prefix("uid=")
+            .unwrap()
+            .to_string()
+    };
+    let input = reference("textbox \"Name\"");
+    let button = reference("button \"Apply\"");
+    assert_eq!(
+        a.ok(
+            "fill",
+            json!({"page_id":pa,"element":input,"value":"Example"}),
+        )
+        .await,
+        "OK"
+    );
     a.ok("click", json!({"page_id":pa,"element":button})).await;
     assert_eq!(
         a.ok(
@@ -359,6 +388,33 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
         a.tool("handle_dialog", json!({"page_id":pa,"accept":true}))
             .await["isError"],
         true
+    );
+    let refreshed = a.ok("inspect_page", json!({"page_id":pa})).await;
+    assert!(refreshed.as_str().unwrap().contains("value=\"Example\""));
+    assert_eq!(
+        a.tool("click", json!({"page_id":pa,"element":button}))
+            .await["isError"],
+        true
+    );
+    let pages = a.ok("list_pages", json!({})).await;
+    assert_eq!(pages[0]["title"], "Fixture");
+    assert_eq!(pages[0]["url"], url);
+    assert!(pages[0].get("headed").is_none());
+    assert_eq!(
+        a.ok(
+            "set_viewport",
+            json!({"page_id":pa,"width":800,"height":600})
+        )
+        .await,
+        "OK"
+    );
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"innerWidth"})
+        )
+        .await,
+        800
     );
     let screenshot = a.tool("take_screenshot", json!({"page_id":pa})).await;
     use base64::Engine;
@@ -412,7 +468,8 @@ async fn timed_out_page_is_closed_without_blocking_other_pages() {
     assert_eq!(result["isError"], true);
     assert!(result.to_string().contains("outcome may be unknown"));
     assert_eq!(
-        a.ok("list_pages", json!({})).await["pages"]
+        a.ok("list_pages", json!({}))
+            .await
             .as_array()
             .unwrap()
             .len(),

@@ -47,6 +47,7 @@ pub struct Page {
     cdp: Cdp,
     operation: Mutex<()>,
     last_used: std::sync::Mutex<Instant>,
+    elements: std::sync::Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -146,13 +147,10 @@ impl Manager {
         &self,
         caller: &Caller,
         url: &str,
-        width: u64,
-        height: u64,
         headed: bool,
         cancel: CancellationToken,
     ) -> Result<Value> {
         validate_url(url)?;
-        validate_viewport(width, height)?;
         self.register(caller).await?;
         let page = {
             // Navigation happens after this registry lock is released.
@@ -220,6 +218,7 @@ impl Manager {
                     cdp: engine.cdp.clone(),
                     operation: Mutex::new(()),
                     last_used: std::sync::Mutex::new(Instant::now()),
+                    elements: std::sync::Mutex::default(),
                 });
                 Ok(page)
             }
@@ -245,12 +244,12 @@ impl Manager {
             state.pages.insert(page.id.clone(), page.clone());
             page
         };
-        let args = json!({"url":url,"width":width,"height":height});
+        let args = json!({"url":url,"width":1440,"height":900});
         match self
             .run(caller, &page.id, "navigate_page", args, cancel)
             .await
         {
-            Ok(result) => Ok(result),
+            Ok(_) => Ok(json!({"page_id":page.id})),
             Err(error) => {
                 let _ = self.close(caller, &page.id).await;
                 Err(error)
@@ -329,10 +328,29 @@ impl Manager {
         result
     }
 
-    pub async fn list(&self, caller: &Caller) -> Value {
-        let state = self.state.lock().await;
-        json!({"pages":state.pages.values().filter(|p| p.owner == caller.thread && p.connection == caller.connection)
-            .map(|p|json!({"page_id":p.id,"headed":p.headed})).collect::<Vec<_>>()})
+    pub async fn list(&self, caller: &Caller) -> Result<Value> {
+        let pages = self
+            .state
+            .lock()
+            .await
+            .pages
+            .values()
+            .filter(|p| p.owner == caller.thread && p.connection == caller.connection)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut result = Vec::new();
+        for page in pages {
+            let info = page
+                .cdp
+                .call(
+                    None,
+                    "Target.getTargetInfo",
+                    json!({"targetId":page.target}),
+                )
+                .await?;
+            result.push(json!({"page_id":page.id,"url":info["targetInfo"]["url"],"title":info["targetInfo"]["title"]}));
+        }
+        Ok(json!(result))
     }
 
     pub async fn status(&self) -> Value {
@@ -344,7 +362,7 @@ impl Manager {
     pub async fn close(&self, caller: &Caller, id: &str) -> Result<Value> {
         let mut state = self.state.lock().await;
         let Some(page) = state.pages.get(id) else {
-            return Ok(json!({"closed":true}));
+            return Ok(json!("OK"));
         };
         if page.owner != caller.thread || page.connection != caller.connection {
             bail!("Page belongs to another caller");
@@ -359,7 +377,7 @@ impl Manager {
         page.cdp.forget_session(&page.session);
         state.reap_unused(&page.root, page.headed).await;
         result.context("Timed out closing page")??;
-        Ok(json!({"page_id":id,"closed":true}))
+        Ok(json!("OK"))
     }
 
     pub async fn end_thread(&self, thread: &str) -> Result<()> {
@@ -561,6 +579,7 @@ impl Page {
             "navigate_page" => {
                 let url = args["url"].as_str().context("url must be a string")?;
                 validate_url(url)?;
+                self.elements.lock().unwrap().clear();
                 self.cdp
                     .call(Some(&self.session), "Page.enable", json!({}))
                     .await?;
@@ -601,10 +620,21 @@ impl Page {
                 }
             }
             "inspect_page" => {
-                return self
+                let tree = self
                     .cdp
-                    .evaluate(&self.session, include_str!("inspect.js"))
-                    .await;
+                    .call(
+                        Some(&self.session),
+                        "Accessibility.getFullAXTree",
+                        json!({}),
+                    )
+                    .await?;
+                let (text, elements) = crate::snapshot::render(
+                    tree["nodes"]
+                        .as_array()
+                        .context("Missing accessibility tree")?,
+                );
+                *self.elements.lock().unwrap() = elements;
+                return Ok(json!(text));
             }
             "evaluate_script" => {
                 return self
@@ -646,28 +676,31 @@ impl Page {
                 let reference = args["element"]
                     .as_str()
                     .context("element must be a string from inspect_page")?;
-                let reference = serde_json::to_string(reference)?;
-                let expression = format!(
-                    "(() => {{const e=globalThis.__dozeElements?.get({reference});if(!e?.isConnected)throw new Error('Stale element; call inspect_page again');e.scrollIntoView({{block:'center'}});return e;}})()"
-                );
+                let backend = *self
+                    .elements
+                    .lock()
+                    .unwrap()
+                    .get(reference)
+                    .context("Stale element; call inspect_page again")?;
                 let element = self
                     .cdp
                     .call(
                         Some(&self.session),
-                        "Runtime.evaluate",
-                        json!({"expression":expression,"returnByValue":false}),
+                        "DOM.resolveNode",
+                        json!({"backendNodeId":backend}),
                     )
-                    .await?;
-                let object = element["result"]["objectId"]
+                    .await
+                    .context("Stale element; call inspect_page again")?;
+                let object = element["object"]["objectId"]
                     .as_str()
                     .context("Stale element; call inspect_page again")?;
                 let result = if name == "fill" {
                     self.cdp.call(Some(&self.session),"Runtime.callFunctionOn",json!({"objectId":object,
-                        "functionDeclaration":"function(value){if(this.disabled||this.readOnly)throw new Error('Element is not editable');this.focus();if(this.isContentEditable)this.textContent=value;else {const proto=this instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(!setter)throw new Error('Element is not an input');setter.call(this,value);}this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}",
+                        "functionDeclaration":"function(value){if(!this.isConnected)throw new Error('Stale element; call inspect_page again');this.scrollIntoView({block:'center'});if(this.disabled||this.readOnly)throw new Error('Element is not editable');this.focus();if(this.isContentEditable)this.textContent=value;else {const proto=this instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(!setter)throw new Error('Element is not an input');setter.call(this,value);}this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}",
                         "arguments":[{"value":args["value"].as_str().context("value must be a string")?}],"returnByValue":true})).await?
                 } else {
                     self.cdp.call(Some(&self.session),"Runtime.callFunctionOn",json!({"objectId":object,
-                        "functionDeclaration":"function(){const r=this.getBoundingClientRect();if(!r.width||!r.height||this.disabled)throw new Error('Element is not actionable');const x=Math.max(0,r.left)+Math.min(r.width,innerWidth-Math.max(0,r.left))/2;const y=Math.max(0,r.top)+Math.min(r.height,innerHeight-Math.max(0,r.top))/2;const hit=document.elementFromPoint(x,y);if(hit!==this&&!this.contains(hit))throw new Error('Element is covered by another element');return {x,y};}","returnByValue":true})).await?
+                        "functionDeclaration":"function(){if(!this.isConnected)throw new Error('Stale element; call inspect_page again');this.scrollIntoView({block:'center'});const r=this.getBoundingClientRect();if(!r.width||!r.height||this.disabled)throw new Error('Element is not actionable');const x=Math.max(0,r.left)+Math.min(r.width,innerWidth-Math.max(0,r.left))/2;const y=Math.max(0,r.top)+Math.min(r.height,innerHeight-Math.max(0,r.top))/2;const hit=document.elementFromPoint(x,y);if(hit!==this&&!this.contains(hit))throw new Error('Element is covered by another element');return {x,y};}","returnByValue":true})).await?
                 };
                 if result.get("exceptionDetails").is_some() {
                     bail!("Element operation failed: {}", result["exceptionDetails"]);
@@ -715,17 +748,7 @@ impl Page {
             }
             _ => bail!("Unknown browser operation"),
         }
-        let info = self
-            .cdp
-            .call(
-                None,
-                "Target.getTargetInfo",
-                json!({"targetId":self.target}),
-            )
-            .await?;
-        Ok(
-            json!({"page_id":self.id,"url":info["targetInfo"]["url"],"title":info["targetInfo"]["title"]}),
-        )
+        Ok(json!("OK"))
     }
 
     async fn viewport(&self, args: &Value) -> Result<()> {
@@ -821,6 +844,7 @@ mod tests {
             session: id.into(),
             cdp: cdp.clone(),
             operation: Mutex::new(()),
+            elements: std::sync::Mutex::default(),
             last_used: std::sync::Mutex::new(if idle {
                 Instant::now() - PAGE_IDLE_TIMEOUT
             } else {
