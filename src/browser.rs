@@ -178,53 +178,102 @@ impl Manager {
             if let std::collections::hash_map::Entry::Vacant(entry) = state.engines.entry(headed) {
                 entry.insert(Engine::launch(&self.chrome, headed).await?);
             }
-            let engine = state.engines.get_mut(&headed).expect("engine was inserted");
-            let context = if let Some(context) = engine.contexts.get(&root) {
-                context.clone()
-            } else {
-                let result = engine
+            let mut allocated_target = None;
+            let allocation: Result<Arc<Page>> = async {
+                let engine = state.engines.get_mut(&headed).expect("engine was inserted");
+                let context = if let Some(context) = engine.contexts.get(&root) {
+                    context.clone()
+                } else {
+                    let result = engine
+                        .cdp
+                        .call(
+                            None,
+                            "Target.createBrowserContext",
+                            json!({"disposeOnDetach":true}),
+                        )
+                        .await?;
+                    let context = string(&result, "browserContextId")?;
+                    engine.contexts.insert(root.clone(), context.clone());
+                    context
+                };
+                let target = engine
                     .cdp
                     .call(
                         None,
-                        "Target.createBrowserContext",
-                        json!({"disposeOnDetach":true}),
+                        "Target.createTarget",
+                        json!({
+                            "url":"about:blank", "browserContextId":context, "background":true,
+                        }),
                     )
                     .await?;
-                let context = string(&result, "browserContextId")?;
-                engine.contexts.insert(root.clone(), context.clone());
-                context
+                let target = string(&target, "targetId")?;
+                allocated_target = Some(target.clone());
+                let session = engine
+                    .cdp
+                    .call(
+                        None,
+                        "Target.attachToTarget",
+                        json!({"targetId":target,"flatten":true}),
+                    )
+                    .await?;
+                let page = Arc::new(Page {
+                    id: Uuid::new_v4().to_string(),
+                    owner: caller.thread.clone(),
+                    connection: caller.connection.clone(),
+                    root: root.clone(),
+                    headed,
+                    target,
+                    session: string(&session, "sessionId")?,
+                    cdp: engine.cdp.clone(),
+                    operation: Mutex::new(()),
+                    dialog: AtomicBool::new(false),
+                });
+                Ok(page)
+            }
+            .await;
+            let page = match allocation {
+                Ok(page) => page,
+                Err(error) => {
+                    if let Some(engine) = state.engines.get_mut(&headed) {
+                        if let Some(target) = allocated_target {
+                            let _ = timeout(
+                                Duration::from_secs(2),
+                                engine.cdp.call(
+                                    None,
+                                    "Target.closeTarget",
+                                    json!({"targetId":target}),
+                                ),
+                            )
+                            .await;
+                        }
+                        let context = engine.contexts.get(&root).cloned();
+                        if !state
+                            .pages
+                            .values()
+                            .any(|p| p.root == root && p.headed == headed)
+                            && let Some(context) = context
+                            && let Some(engine) = state.engines.get_mut(&headed)
+                        {
+                            engine.contexts.remove(&root);
+                            let _ = timeout(
+                                Duration::from_secs(2),
+                                engine.cdp.call(
+                                    None,
+                                    "Target.disposeBrowserContext",
+                                    json!({"browserContextId":context}),
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                    if !state.pages.values().any(|p| p.headed == headed)
+                        && let Some(mut engine) = state.engines.remove(&headed)
+                    {
+                        engine.stop().await;
+                    }
+                    return Err(error);
+                }
             };
-            let target = engine
-                .cdp
-                .call(
-                    None,
-                    "Target.createTarget",
-                    json!({
-                        "url":"about:blank", "browserContextId":context, "background":true,
-                    }),
-                )
-                .await?;
-            let target = string(&target, "targetId")?;
-            let session = engine
-                .cdp
-                .call(
-                    None,
-                    "Target.attachToTarget",
-                    json!({"targetId":target,"flatten":true}),
-                )
-                .await?;
-            let page = Arc::new(Page {
-                id: Uuid::new_v4().to_string(),
-                owner: caller.thread.clone(),
-                connection: caller.connection.clone(),
-                root,
-                headed,
-                target,
-                session: string(&session, "sessionId")?,
-                cdp: engine.cdp.clone(),
-                operation: Mutex::new(()),
-                dialog: AtomicBool::new(false),
-            });
             state.pages.insert(page.id.clone(), page.clone());
             page
         };

@@ -12,6 +12,8 @@ A local MCP service that shares one lazily started Chrome for Testing across Cod
 
 The installed service is one Rust executable and does not require Node.js or mcp-doze. Headless browsing shares one Chromium instance. Explicit joint viewing uses a separate headed instance.
 
+Sandboxed clients connect over HTTP MCP. Chromium starts under the LaunchAgent, outside the command sandbox. Environments that prohibit loopback connections cannot use this service.
+
 ## Install
 
 ```sh

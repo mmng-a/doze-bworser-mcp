@@ -10,6 +10,7 @@ import secrets
 import shutil
 import subprocess
 import tomllib
+import time
 import urllib.error
 import urllib.request
 
@@ -67,12 +68,18 @@ def main():
             "ProgramArguments": [str(binary), "serve", "--config", str(settings_path)],
             "RunAtLoad": True,
             "KeepAlive": True,
-            "ProcessType": "Background",
+            # Background also throttles Chromium while it handles user requests.
+            "ProcessType": "Interactive",
             "StandardOutPath": str(logs / "stdout.log"),
             "StandardErrorPath": str(logs / "stderr.log"),
         }, stream)
     domain = f"gui/{os.getuid()}"
     subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], check=False, capture_output=True)
+    deadline = time.monotonic() + 10
+    while subprocess.run(["launchctl", "print", f"{domain}/{label}"], capture_output=True).returncode == 0:
+        if time.monotonic() >= deadline:
+            raise SystemExit("The previous service is still stopping; installation did not start another instance.")
+        time.sleep(0.1)
     subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True)
 
     codex = user_dir / ".codex"
