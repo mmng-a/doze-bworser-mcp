@@ -3,25 +3,18 @@
 use crate::cdp::Cdp;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
     sync::Mutex,
-    time::timeout,
+    time::{Instant, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const PAGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 pub struct Manager {
     chrome: PathBuf,
@@ -53,7 +46,7 @@ pub struct Page {
     session: String,
     cdp: Cdp,
     operation: Mutex<()>,
-    dialog: AtomicBool,
+    last_used: std::sync::Mutex<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -226,7 +219,7 @@ impl Manager {
                     session: string(&session, "sessionId")?,
                     cdp: engine.cdp.clone(),
                     operation: Mutex::new(()),
-                    dialog: AtomicBool::new(false),
+                    last_used: std::sync::Mutex::new(Instant::now()),
                 });
                 Ok(page)
             }
@@ -234,43 +227,18 @@ impl Manager {
             let page = match allocation {
                 Ok(page) => page,
                 Err(error) => {
-                    if let Some(engine) = state.engines.get_mut(&headed) {
-                        if let Some(target) = allocated_target {
-                            let _ = timeout(
-                                Duration::from_secs(2),
-                                engine.cdp.call(
-                                    None,
-                                    "Target.closeTarget",
-                                    json!({"targetId":target}),
-                                ),
-                            )
-                            .await;
-                        }
-                        let context = engine.contexts.get(&root).cloned();
-                        if !state
-                            .pages
-                            .values()
-                            .any(|p| p.root == root && p.headed == headed)
-                            && let Some(context) = context
-                            && let Some(engine) = state.engines.get_mut(&headed)
-                        {
-                            engine.contexts.remove(&root);
-                            let _ = timeout(
-                                Duration::from_secs(2),
-                                engine.cdp.call(
-                                    None,
-                                    "Target.disposeBrowserContext",
-                                    json!({"browserContextId":context}),
-                                ),
-                            )
-                            .await;
-                        }
-                    }
-                    if !state.pages.values().any(|p| p.headed == headed)
-                        && let Some(mut engine) = state.engines.remove(&headed)
+                    if let Some(engine) = state.engines.get_mut(&headed)
+                        && let Some(target) = allocated_target
                     {
-                        engine.stop().await;
+                        let _ = timeout(
+                            Duration::from_secs(2),
+                            engine
+                                .cdp
+                                .call(None, "Target.closeTarget", json!({"targetId":target})),
+                        )
+                        .await;
                     }
+                    state.reap_unused(&root, headed).await;
                     return Err(error);
                 }
             };
@@ -295,7 +263,7 @@ impl Manager {
         let page = state
             .pages
             .get(id)
-            .context("Page is closed or does not exist")?;
+            .context("Page is closed or expired; open a new page with open_page")?;
         if page.owner != caller.thread || page.connection != caller.connection {
             bail!("Page belongs to another caller");
         }
@@ -317,10 +285,19 @@ impl Manager {
                 result.context("Timed out waiting for this page; operation was not sent")?,
         };
         self.page(caller, id).await?;
-        if page.dialog.load(Ordering::Acquire) && name != "handle_dialog" {
-            bail!("A JavaScript dialog is open; call handle_dialog before continuing");
+        if page.idle() {
+            self.close(caller, id).await?;
+            bail!("Page is closed or expired; open a new page with open_page");
         }
         let mut events = page.cdp.events();
+        let dialog = page.cdp.dialog(&page.session);
+        if name == "handle_dialog" {
+            if dialog.is_none() {
+                bail!("No JavaScript dialog is open");
+            }
+        } else if let Some(dialog) = dialog {
+            return Err(dialog_error(&dialog));
+        }
         let opening = async {
             loop {
                 match events.recv().await {
@@ -337,7 +314,7 @@ impl Manager {
         };
         let result = tokio::select! {
             _ = cancel.cancelled() => Err(anyhow!("Cancelled during execution; outcome may be unknown")),
-            dialog=opening => { page.dialog.store(true,Ordering::Release); dialog.map(|dialog|json!({"page_id":id,"action_completed":false,"dialog":dialog,"next_action":"handle_dialog; do not repeat the original operation"})) },
+            dialog=opening, if name != "handle_dialog" => Err(dialog.map_or_else(|e| e, |d| dialog_error(&d))),
             result = timeout(self.operation_timeout, page.perform(name, &args)) =>
                 result.unwrap_or_else(|_| Err(anyhow!("Operation timed out; outcome may be unknown"))),
         };
@@ -347,6 +324,7 @@ impl Manager {
         {
             let _ = self.close(caller, id).await;
         }
+        *page.last_used.lock().unwrap() = Instant::now();
         drop(guard);
         result
     }
@@ -378,29 +356,8 @@ impl Manager {
                 .call(None, "Target.closeTarget", json!({"targetId":page.target})),
         )
         .await;
-        let root_unused = !state
-            .pages
-            .values()
-            .any(|p| p.root == page.root && p.headed == page.headed);
-        if root_unused
-            && let Some(engine) = state.engines.get_mut(&page.headed)
-            && let Some(context) = engine.contexts.remove(&page.root)
-        {
-            let _ = timeout(
-                Duration::from_secs(3),
-                engine.cdp.call(
-                    None,
-                    "Target.disposeBrowserContext",
-                    json!({"browserContextId":context}),
-                ),
-            )
-            .await;
-        }
-        if !state.pages.values().any(|p| p.headed == page.headed)
-            && let Some(mut engine) = state.engines.remove(&page.headed)
-        {
-            engine.stop().await;
-        }
+        page.cdp.forget_session(&page.session);
+        state.reap_unused(&page.root, page.headed).await;
         result.context("Timed out closing page")??;
         Ok(json!({"page_id":id,"closed":true}))
     }
@@ -425,10 +382,13 @@ impl Manager {
                 })
                 .collect::<Vec<_>>()
         };
+        let mut failure = None;
         for (caller, id) in pages {
-            self.close(&caller, &id).await?;
+            if let Err(error) = self.close(&caller, &id).await {
+                failure.get_or_insert(error);
+            }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     pub async fn end_connection(&self, connection: &str) {
@@ -455,6 +415,29 @@ impl Manager {
         }
     }
 
+    pub async fn expire_idle(&self) {
+        let pages = self
+            .state
+            .lock()
+            .await
+            .pages
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for page in pages {
+            if let Ok(_guard) = page.operation.try_lock()
+                && page.idle()
+            {
+                let caller = Caller {
+                    thread: page.owner.clone(),
+                    parent: None,
+                    connection: page.connection.clone(),
+                };
+                let _ = self.close(&caller, &page.id).await;
+            }
+        }
+    }
+
     pub async fn shutdown(&self) {
         let mut state = self.state.lock().await;
         state.pages.clear();
@@ -462,6 +445,41 @@ impl Manager {
             engine.stop().await;
         }
     }
+}
+
+impl State {
+    async fn reap_unused(&mut self, root: &str, headed: bool) {
+        if !self
+            .pages
+            .values()
+            .any(|p| p.root == root && p.headed == headed)
+            && let Some(engine) = self.engines.get_mut(&headed)
+            && let Some(context) = engine.contexts.remove(root)
+        {
+            let _ = timeout(
+                Duration::from_secs(3),
+                engine.cdp.call(
+                    None,
+                    "Target.disposeBrowserContext",
+                    json!({"browserContextId":context}),
+                ),
+            )
+            .await;
+        }
+        if !self.pages.values().any(|p| p.headed == headed)
+            && let Some(mut engine) = self.engines.remove(&headed)
+        {
+            engine.stop().await;
+        }
+    }
+}
+
+fn dialog_error(dialog: &Value) -> anyhow::Error {
+    anyhow!(
+        "JavaScript dialog ({}): {}. Use handle_dialog; do not repeat the original operation",
+        dialog["type"].as_str().unwrap_or("unknown"),
+        dialog["message"].as_str().unwrap_or("")
+    )
 }
 
 impl Engine {
@@ -534,6 +552,10 @@ impl Engine {
 }
 
 impl Page {
+    fn idle(&self) -> bool {
+        self.last_used.lock().unwrap().elapsed() >= PAGE_IDLE_TIMEOUT
+    }
+
     async fn perform(&self, name: &str, args: &Value) -> Result<Value> {
         match name {
             "navigate_page" => {
@@ -690,7 +712,6 @@ impl Page {
             }
             "handle_dialog" => {
                 self.cdp.call(Some(&self.session),"Page.handleJavaScriptDialog",json!({"accept":args["accept"].as_bool().context("accept must be a boolean")?})).await?;
-                self.dialog.store(false, Ordering::Release);
             }
             _ => bail!("Unknown browser operation"),
         }
@@ -702,8 +723,9 @@ impl Page {
                 json!({"targetId":self.target}),
             )
             .await?;
-        let state = json!({"url":info["targetInfo"]["url"],"title":info["targetInfo"]["title"]});
-        Ok(json!({"page_id":self.id,"action_completed":true,"page":state}))
+        Ok(
+            json!({"page_id":self.id,"url":info["targetInfo"]["url"],"title":info["targetInfo"]["title"]}),
+        )
     }
 
     async fn viewport(&self, args: &Value) -> Result<()> {
@@ -744,4 +766,124 @@ fn validate_viewport(width: u64, height: u64) -> Result<()> {
         bail!("Viewport must be 200–3840 × 200–2160");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+
+    async fn connection(
+        count: usize,
+        fail_first: bool,
+    ) -> (Cdp, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut closed = Vec::new();
+            while let Some(Ok(message)) = socket.next().await {
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], "Target.closeTarget");
+                closed.push(request["params"]["targetId"].as_str().unwrap().to_owned());
+                let response = if fail_first && closed.len() == 1 {
+                    json!({"id":request["id"],"error":{"message":"test close failure"}})
+                } else {
+                    json!({"id":request["id"],"result":{"success":true}})
+                };
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                if closed.len() == count {
+                    break;
+                }
+            }
+            closed
+        });
+        (
+            Cdp::connect(&format!("ws://{address}")).await.unwrap(),
+            task,
+        )
+    }
+
+    fn page(cdp: &Cdp, id: &str, idle: bool) -> Arc<Page> {
+        Arc::new(Page {
+            id: id.into(),
+            owner: "owner".into(),
+            connection: "connection".into(),
+            root: "owner".into(),
+            headed: false,
+            target: id.into(),
+            session: id.into(),
+            cdp: cdp.clone(),
+            operation: Mutex::new(()),
+            last_used: std::sync::Mutex::new(if idle {
+                Instant::now() - PAGE_IDLE_TIMEOUT
+            } else {
+                Instant::now()
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn idle_pages_expire_but_fresh_and_busy_pages_survive() {
+        let (cdp, closed) = connection(3, false).await;
+        let manager = Manager::new("/missing/chrome".into(), Duration::from_secs(1));
+        let expired = page(&cdp, "expired", true);
+        let fresh = page(&cdp, "fresh", false);
+        let busy = page(&cdp, "busy", true);
+        let guard = busy.operation.lock().await;
+        for p in [&expired, &fresh, &busy] {
+            manager
+                .state
+                .lock()
+                .await
+                .pages
+                .insert(p.id.clone(), p.clone());
+        }
+        manager.expire_idle().await;
+        assert_eq!(manager.status().await["page_count"], 2);
+        let caller = Caller {
+            thread: "owner".into(),
+            parent: None,
+            connection: "connection".into(),
+        };
+        let error = manager
+            .run(
+                &caller,
+                "expired",
+                "inspect_page",
+                json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("open a new page"));
+        *fresh.last_used.lock().unwrap() = Instant::now() - PAGE_IDLE_TIMEOUT;
+        drop(guard);
+        manager.expire_idle().await;
+        assert_eq!(manager.status().await["page_count"], 0);
+        assert_eq!(closed.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn thread_cleanup_continues_after_a_close_failure() {
+        let (cdp, closed) = connection(2, true).await;
+        let manager = Manager::new("/missing/chrome".into(), Duration::from_secs(1));
+        for id in ["first", "second"] {
+            manager
+                .state
+                .lock()
+                .await
+                .pages
+                .insert(id.into(), page(&cdp, id, false));
+        }
+        assert!(manager.end_thread("owner").await.is_err());
+        assert_eq!(manager.status().await["page_count"], 0);
+        assert_eq!(closed.await.unwrap().len(), 2);
+    }
 }

@@ -47,7 +47,9 @@ Codex thread identity comes from request metadata, not model-provided arguments.
 
 Navigation completes at DOM readiness, rather than waiting for all background traffic. Input operations report action completion, not proof of a downstream business result. Inspect the resulting page to verify that result. Element references are refreshed by `inspect_page` and expire on navigation. Input values are not included in inspection output.
 
-If an action opens a JavaScript dialog, the result reports the pending dialog. Call `handle_dialog` to accept or dismiss it, then inspect the result without repeating the original action.
+Pages idle for at least 30 minutes are closed periodically. Operations in progress are excluded. A closed page returns an error asking you to open a new page.
+
+If a JavaScript dialog is open, operations return an error with its message. Call `handle_dialog` to accept or dismiss it, then inspect the result without repeating the original action.
 
 The default waiting and operation deadlines are 20 seconds each. A request that expires while waiting for a page is not executed. If a running request times out or is cancelled, its page is closed to prevent subsequent work using an uncertain page state; external effects may already have happened. The operation is never automatically retried. Browser crashes lose the affected pages; stale IDs are not reassigned.
 

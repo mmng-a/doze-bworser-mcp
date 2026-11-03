@@ -327,9 +327,11 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
         "Clicked"
     );
     a.ok("evaluate_script",json!({"page_id":pa,"expression":"document.querySelector('button').onclick=()=>{document.querySelector('h1').textContent=confirm('Continue?')?'Confirmed':'Dismissed'};true"})).await;
-    let dialog = a.ok("click", json!({"page_id":pa,"element":button})).await;
-    assert_eq!(dialog["action_completed"], false);
-    assert_eq!(dialog["dialog"]["type"], "confirm");
+    let dialog = a
+        .tool("click", json!({"page_id":pa,"element":button}))
+        .await;
+    assert_eq!(dialog["isError"], true);
+    assert!(dialog.to_string().contains("confirm"));
     a.ok("handle_dialog", json!({"page_id":pa,"accept":true}))
         .await;
     assert_eq!(
@@ -339,6 +341,24 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
         )
         .await,
         "Confirmed"
+    );
+    a.ok(
+        "evaluate_script",
+        json!({"page_id":pa,"expression":"setTimeout(()=>alert('Delayed alert'),150);true"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = Instant::now();
+    let dialog = a.tool("inspect_page", json!({"page_id":pa})).await;
+    assert_eq!(dialog["isError"], true);
+    assert!(dialog.to_string().contains("Delayed alert"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    a.ok("handle_dialog", json!({"page_id":pa,"accept":true}))
+        .await;
+    assert_eq!(
+        a.tool("handle_dialog", json!({"page_id":pa,"accept":true}))
+            .await["isError"],
+        true
     );
     let screenshot = a.tool("take_screenshot", json!({"page_id":pa})).await;
     use base64::Engine;

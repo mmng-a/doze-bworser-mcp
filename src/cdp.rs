@@ -22,6 +22,7 @@ pub struct Cdp {
     next_id: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
     events: broadcast::Sender<Value>,
+    dialogs: Arc<std::sync::Mutex<HashMap<String, Value>>>,
 }
 
 impl Cdp {
@@ -35,6 +36,8 @@ impl Cdp {
         let connected = alive.clone();
         let (events, _) = broadcast::channel(64);
         let incoming_events = events.clone();
+        let dialogs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let incoming_dialogs = dialogs.clone();
         tokio::spawn(async move {
             while let Some(message) = messages.recv().await {
                 if sink.send(message).await.is_err() {
@@ -51,6 +54,20 @@ impl Cdp {
                     continue;
                 };
                 if value.get("id").is_none() {
+                    if let Some(session) = value["sessionId"].as_str() {
+                        match value["method"].as_str() {
+                            Some("Page.javascriptDialogOpening") => {
+                                incoming_dialogs
+                                    .lock()
+                                    .unwrap()
+                                    .insert(session.into(), value["params"].clone());
+                            }
+                            Some("Page.javascriptDialogClosed") => {
+                                incoming_dialogs.lock().unwrap().remove(session);
+                            }
+                            _ => {}
+                        }
+                    }
                     let _ = incoming_events.send(value);
                     continue;
                 }
@@ -78,6 +95,7 @@ impl Cdp {
             next_id: Arc::new(AtomicU64::new(1)),
             alive,
             events,
+            dialogs,
         })
     }
 
@@ -87,6 +105,14 @@ impl Cdp {
 
     pub fn events(&self) -> broadcast::Receiver<Value> {
         self.events.subscribe()
+    }
+
+    pub fn dialog(&self, session: &str) -> Option<Value> {
+        self.dialogs.lock().unwrap().get(session).cloned()
+    }
+
+    pub fn forget_session(&self, session: &str) {
+        self.dialogs.lock().unwrap().remove(session);
     }
 
     pub async fn call(&self, session: Option<&str>, method: &str, params: Value) -> Result<Value> {

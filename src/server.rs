@@ -151,10 +151,7 @@ impl ServerHandler for BrowserService {
 }
 
 fn failure(error: anyhow::Error) -> CallToolResult {
-    let message = format!("{error:#}");
-    let mut result = CallToolResult::error(vec![ContentBlock::text(&message)]);
-    result.structured_content = Some(json!({"error":message,"retry_automatically":false}));
-    result
+    CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))])
 }
 
 fn catalog() -> Vec<Tool> {
@@ -344,6 +341,9 @@ async fn lifecycle(State(access): State<Access>, Json(event): Json<Lifecycle>) -
 
 pub fn application(config: Config, manager: Arc<Manager>, cancel: CancellationToken) -> Router {
     let shared = manager.clone();
+    let mut sessions = LocalSessionManager::default();
+    // The transport must outlive the 30-minute page idle limit.
+    sessions.session_config.keep_alive = Some(Duration::from_secs(60 * 60));
     let service = StreamableHttpService::new(
         move || {
             Ok(BrowserService {
@@ -353,7 +353,7 @@ pub fn application(config: Config, manager: Arc<Manager>, cancel: CancellationTo
                 }),
             })
         },
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(sessions),
         StreamableHttpServerConfig::default()
             .with_json_response(true)
             .with_cancellation_token(cancel)
@@ -381,6 +381,16 @@ pub async fn serve(config: Config) -> Result<()> {
     ));
     let cancel = CancellationToken::new();
     let app = application(config.clone(), manager.clone(), cancel.clone());
+    let idle_manager = manager.clone();
+    let idle_stop = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = idle_stop.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(30)) => idle_manager.expire_idle().await,
+            }
+        }
+    });
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port)).await?;
     eprintln!(
