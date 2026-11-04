@@ -31,16 +31,17 @@ pub struct Config {
     pub chrome_path: PathBuf,
     #[serde(default = "default_node")]
     pub node_path: PathBuf,
-    #[serde(default = "default_devtools")]
-    pub devtools_path: PathBuf,
+    #[serde(default = "default_worker")]
+    pub worker_path: PathBuf,
     #[serde(default = "default_timeout")]
     pub operation_timeout_seconds: u64,
 }
 pub fn default_node() -> PathBuf {
     PathBuf::from("node")
 }
-pub fn default_devtools() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share/doze-bworser-mcp/runtime/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js")
+pub fn default_worker() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join(".local/share/doze-bworser-mcp/runtime/worker.mjs")
 }
 fn default_timeout() -> u64 {
     20
@@ -317,6 +318,18 @@ async fn health(State(access): State<Access>) -> Json<Value> {
     Json(access.manager.status().await)
 }
 
+async fn prepare_update(State(access): State<Access>) -> Response {
+    match access.manager.prepare_update().await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (StatusCode::CONFLICT, error.to_string()).into_response(),
+    }
+}
+
+async fn cancel_update(State(access): State<Access>) -> StatusCode {
+    access.manager.cancel_update().await;
+    StatusCode::NO_CONTENT
+}
+
 #[derive(Deserialize)]
 struct Lifecycle {
     event: String,
@@ -377,6 +390,7 @@ pub fn application(config: Config, manager: Arc<Manager>, cancel: CancellationTo
         .nest_service("/mcp", service)
         .route("/health", get(health))
         .route("/lifecycle", post(lifecycle))
+        .route("/update", post(prepare_update).delete(cancel_update))
         .route_layer(middleware::from_fn_with_state(access.clone(), authorize))
         .with_state(access)
 }
@@ -392,7 +406,7 @@ pub async fn serve(config: Config) -> Result<()> {
         config.chrome_path.clone(),
         Duration::from_secs(config.operation_timeout_seconds),
         config.node_path.clone(),
-        config.devtools_path.clone(),
+        config.worker_path.clone(),
     ));
     let cancel = CancellationToken::new();
     let app = application(config.clone(), manager.clone(), cancel.clone());

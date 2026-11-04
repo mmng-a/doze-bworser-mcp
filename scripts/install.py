@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Install the built local service and register its HTTP MCP and lifecycle hooks."""
 
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,9 +12,94 @@ import secrets
 import shutil
 import subprocess
 import tomllib
+import tempfile
 import time
 import urllib.error
 import urllib.request
+
+
+def prepare_runtime(root, user_dir, npm):
+    sources = ["package.json", "package-lock.json", "worker.mjs", "snapshot.mjs",
+               "vendor/SnapshotFormatter.mjs", "vendor/LICENSE", "vendor/README.md"]
+    digest = hashlib.sha256()
+    for name in sources:
+        digest.update(name.encode())
+        digest.update((root / "runtime" / name).read_bytes())
+    versions = user_dir / ".local/share/doze-bworser-mcp/runtimes"
+    versions.mkdir(parents=True, exist_ok=True)
+    runtime = versions / digest.hexdigest()[:20]
+    if not runtime.exists():
+        with tempfile.TemporaryDirectory(prefix=".prepare-", dir=versions) as temporary:
+            staging = Path(temporary) / "runtime"
+            for name in sources:
+                destination = staging / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / "runtime" / name, destination)
+            subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+                           cwd=staging, check=True)
+            staging.rename(runtime)
+    return runtime
+
+
+def service_update(settings, method):
+    request = urllib.request.Request(
+        f'http://127.0.0.1:{settings["port"]}/update', method=method,
+        headers={"Authorization": "Bearer " + settings["token"]},
+    )
+    with urllib.request.urlopen(request, timeout=35):
+        pass
+
+
+def replace_service(settings, settings_path, built, binary, plist, plist_data):
+    label = "com.masasam.doze-bworser-mcp"
+    domain = f"gui/{os.getuid()}"
+    target = f"{domain}/{label}"
+    backups = {path: path.read_bytes() if path.exists() else None
+               for path in [settings_path, binary, plist]}
+    pending = binary.with_suffix(".new")
+    shutil.copy2(built, pending)
+    pending.chmod(0o755)
+    running = subprocess.run(["launchctl", "print", target], capture_output=True).returncode == 0
+    paused = False
+    stopped = False
+    try:
+        if running:
+            try:
+                service_update(settings, "POST")
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    raise SystemExit("The installed service predates safe updates; migrate it before running this installer.") from error
+                raise SystemExit("The service is busy or updating; installation left it unchanged.") from error
+            paused = True
+        if running:
+            subprocess.run(["launchctl", "bootout", target], check=True, capture_output=True)
+            stopped = True
+            deadline = time.monotonic() + 10
+            while subprocess.run(["launchctl", "print", target], capture_output=True).returncode == 0:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("The previous service is still stopping")
+                time.sleep(0.1)
+        pending.replace(binary)
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        settings_path.chmod(0o600)
+        plist.write_bytes(plistlib.dumps(plist_data))
+        subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True)
+    except BaseException:
+        if stopped:
+            for path, contents in backups.items():
+                if contents is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(contents)
+            if backups[binary] is not None:
+                binary.chmod(0o755)
+            if backups[plist] is not None:
+                subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=False)
+        if paused:
+            service_update(settings, "DELETE")
+        raise
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def main():
@@ -24,20 +111,13 @@ def main():
     settings_dir = user_dir / ".config/doze-bworser-mcp"
     settings_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings_path = settings_dir / "config.json"
+    install_lock = (settings_dir / "install.lock").open("a")
+    try:
+        fcntl.flock(install_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("Another installation is already in progress.") from None
     if settings_path.exists():
         settings = json.loads(settings_path.read_text())
-        request = urllib.request.Request(
-            f'http://127.0.0.1:{settings["port"]}/health',
-            headers={"Authorization": "Bearer " + settings["token"]},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=2) as response:
-                state = json.load(response)
-            if state.get("name") != "doze-bworser-mcp" or state.get("page_count", 0):
-                raise SystemExit("The service has active pages. Close them before updating.")
-        except urllib.error.URLError as error:
-            if not isinstance(error.reason, ConnectionRefusedError):
-                raise SystemExit("Cannot safely verify the existing service before updating.") from error
     else:
         settings = {
             "port": 45917,
@@ -51,24 +131,12 @@ def main():
     npm = shutil.which("npm")
     if not node or not npm:
         raise SystemExit("Install Node.js and npm before running the installer.")
-    runtime = user_dir / ".local/share/doze-bworser-mcp/runtime"
-    entry = runtime / "node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
-    lock = root / "runtime/package-lock.json"
-    if not entry.is_file() or not (runtime / "package-lock.json").is_file() or (runtime / "package-lock.json").read_bytes() != lock.read_bytes():
-        runtime.mkdir(parents=True, exist_ok=True)
-        for name in ["package.json", "package-lock.json"]:
-            shutil.copy2(root / "runtime" / name, runtime / name)
-        subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=runtime, check=True)
+    runtime = prepare_runtime(root, user_dir, npm)
     settings["node_path"] = node
-    settings["devtools_path"] = str(entry)
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-    settings_path.chmod(0o600)
+    settings.pop("devtools_path", None)
+    settings["worker_path"] = str(runtime / "worker.mjs")
     binary = user_dir / ".local/bin/doze-bworser-mcp"
     binary.parent.mkdir(parents=True, exist_ok=True)
-    pending = binary.with_suffix(".new")
-    shutil.copy2(built, pending)
-    pending.chmod(0o755)
-    pending.replace(binary)
 
     label = "com.masasam.doze-bworser-mcp"
     agents = user_dir / "Library/LaunchAgents"
@@ -76,25 +144,17 @@ def main():
     logs = user_dir / "Library/Logs/doze-bworser-mcp"
     logs.mkdir(parents=True, exist_ok=True, mode=0o700)
     plist = agents / (label + ".plist")
-    with plist.open("wb") as stream:
-        plistlib.dump({
-            "Label": label,
-            "ProgramArguments": [str(binary), "serve", "--config", str(settings_path)],
-            "RunAtLoad": True,
-            "KeepAlive": True,
-            # Background also throttles Chromium while it handles user requests.
-            "ProcessType": "Interactive",
-            "StandardOutPath": str(logs / "stdout.log"),
-            "StandardErrorPath": str(logs / "stderr.log"),
-        }, stream)
-    domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], check=False, capture_output=True)
-    deadline = time.monotonic() + 10
-    while subprocess.run(["launchctl", "print", f"{domain}/{label}"], capture_output=True).returncode == 0:
-        if time.monotonic() >= deadline:
-            raise SystemExit("The previous service is still stopping; installation did not start another instance.")
-        time.sleep(0.1)
-    subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True)
+    plist_data = {
+        "Label": label,
+        "ProgramArguments": [str(binary), "serve", "--config", str(settings_path)],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        # Background also throttles Chromium while it handles user requests.
+        "ProcessType": "Interactive",
+        "StandardOutPath": str(logs / "stdout.log"),
+        "StandardErrorPath": str(logs / "stderr.log"),
+    }
+    replace_service(settings, settings_path, built, binary, plist, plist_data)
 
     codex = user_dir / ".codex"
     codex.mkdir(parents=True, exist_ok=True)

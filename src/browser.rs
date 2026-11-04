@@ -1,4 +1,4 @@
-//! Share DevTools MCP workers and enforce caller ownership and page lifetimes.
+//! Share Puppeteer workers and enforce caller ownership and page lifetimes.
 use crate::upstream::{self, Engine};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -14,7 +14,7 @@ const PAGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub struct Manager {
     chrome: PathBuf,
     node: PathBuf,
-    devtools: PathBuf,
+    worker: PathBuf,
     operation_timeout: Duration,
     state: Mutex<State>,
 }
@@ -23,6 +23,7 @@ struct State {
     engines: HashMap<bool, Arc<Engine>>,
     pages: HashMap<String, Arc<Page>>,
     parents: HashMap<String, Option<String>>,
+    updating: bool,
 }
 pub struct Page {
     pub id: String,
@@ -77,12 +78,12 @@ impl Manager {
         chrome: PathBuf,
         operation_timeout: Duration,
         node: PathBuf,
-        devtools: PathBuf,
+        worker: PathBuf,
     ) -> Self {
         Self {
             chrome,
             node,
-            devtools,
+            worker,
             operation_timeout,
             state: Mutex::default(),
         }
@@ -145,48 +146,39 @@ impl Manager {
         self.register(caller).await?;
         let page = {
             let mut state = self.state.lock().await;
+            anyhow::ensure!(
+                !state.updating,
+                "Service is updating; try open_page again after the update"
+            );
             let root = Self::root(&state, &caller.thread)?;
-            if state.engines.get(&headed).is_some_and(|e| !e.alive()) {
-                state.pages.retain(|_, p| p.headed != headed);
-                if let Some(engine) = state.engines.remove(&headed) {
-                    engine.stop().await;
-                }
-            }
+            state.reap_dead().await;
             if let std::collections::hash_map::Entry::Vacant(entry) = state.engines.entry(headed) {
-                entry.insert(
-                    Engine::launch(&self.node, &self.devtools, &self.chrome, headed).await?,
-                );
+                entry.insert(Engine::launch(&self.node, &self.worker, &self.chrome, headed).await?);
             }
             let engine = state.engines[&headed].clone();
-            // Navigating inside new_page would hold DevTools' browser-wide queue.
             let allocated = timeout(
                 Duration::from_secs(30),
-                engine.call(
-                    "new_page",
-                    json!({"url":"about:blank","background":true,"isolatedContext":root}),
-                ),
+                engine.call("new_page", json!({"root":root})),
             )
             .await;
             let allocated = match allocated {
                 Ok(Ok(result)) => result,
                 error => {
+                    if error.is_err() {
+                        // An allocation that timed out may still create an untracked page.
+                        state.pages.retain(|_, p| p.headed != headed);
+                    }
                     if !state.pages.values().any(|p| p.headed == headed) {
                         state.engines.remove(&headed);
                         engine.stop().await;
                     }
                     return Err(match error {
                         Ok(Err(e)) => e,
-                        _ => anyhow!("DevTools page creation timed out"),
+                        _ => anyhow!("Puppeteer page creation timed out"),
                     });
                 }
             };
-            let backend = allocated["structuredContent"]["pages"]
-                .as_array()
-                .context("Missing created page")?
-                .iter()
-                .find(|p| p["selected"] == true && p["isolatedContext"] == root)
-                .and_then(|p| p["id"].as_u64())
-                .context("Missing created page ID")?;
+            let backend = allocated.as_u64().context("Missing created page ID")?;
             let page = Arc::new(Page {
                 id: Uuid::new_v4().to_string(),
                 owner: caller.thread.clone(),
@@ -248,7 +240,7 @@ impl Manager {
         };
         self.page(caller, id).await?;
         if page.idle() {
-            self.close(caller, id).await?;
+            self.close_now(caller, id).await?;
             bail!("Page is closed or expired; open a new page with open_page");
         }
         let result = tokio::select! {
@@ -258,7 +250,7 @@ impl Manager {
         if result
             .as_ref()
             .is_err_and(|e| e.to_string().contains("outcome may be unknown"))
-            && self.close(caller, id).await.is_err()
+            && self.close_now(caller, id).await.is_err()
         {
             let mut state = self.state.lock().await;
             state
@@ -280,13 +272,14 @@ impl Manager {
 
     pub async fn list(&self, caller: &Caller) -> Result<Value> {
         let mut state = self.state.lock().await;
+        state.reap_dead().await;
         let mut live = HashMap::new();
         for (headed, engine) in &state.engines {
             for page in engine.pages().await? {
                 live.insert(
                     (
                         *headed,
-                        page["id"].as_u64().context("Invalid DevTools page ID")?,
+                        page["id"].as_u64().context("Invalid Puppeteer page ID")?,
                     ),
                     page,
                 );
@@ -309,13 +302,47 @@ impl Manager {
         ))
     }
 
+    pub async fn prepare_update(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .try_lock()
+            .context("Service is busy; retry the update later")?;
+        state.reap_dead().await;
+        anyhow::ensure!(
+            state.pages.is_empty(),
+            "The service has active pages; close them before updating"
+        );
+        anyhow::ensure!(!state.updating, "Another update is already in progress");
+        state.updating = true;
+        Ok(())
+    }
+
+    pub async fn cancel_update(&self) {
+        self.state.lock().await.updating = false;
+    }
+
     pub async fn status(&self) -> Value {
         let state = self.state.lock().await;
         json!({"name":"doze-bworser-mcp","version":env!("CARGO_PKG_VERSION"),"browser_count":state.engines.len(),"page_count":state.pages.len()})
     }
 
     pub async fn close(&self, caller: &Caller, id: &str) -> Result<Value> {
+        let page = self.state.lock().await.pages.get(id).cloned();
+        let Some(page) = page else {
+            return Ok(json!("OK"));
+        };
+        if page.owner != caller.thread || page.connection != caller.connection {
+            bail!("Page belongs to another caller");
+        }
+        let _guard = timeout(self.operation_timeout, page.operation.lock())
+            .await
+            .context("Timed out waiting to close this page; close was not sent")?;
+        self.close_now(caller, id).await
+    }
+
+    async fn close_now(&self, caller: &Caller, id: &str) -> Result<Value> {
         let mut state = self.state.lock().await;
+        state.reap_dead().await;
         let Some(page) = state.pages.get(id) else {
             return Ok(json!("OK"));
         };
@@ -323,15 +350,11 @@ impl Manager {
             bail!("Page belongs to another caller");
         }
         let page = page.clone();
-        let closed = timeout(Duration::from_secs(5), async {
-            let live = page.engine.pages().await?;
-            if live.iter().any(|p| p["id"] == page.upstream_id) {
-                page.engine
-                    .call("close_page", json!({"pageId":page.upstream_id}))
-                    .await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
+        let closed = timeout(
+            Duration::from_secs(5),
+            page.engine
+                .call("close_page", json!({"page_id":page.upstream_id})),
+        )
         .await;
         let closed = closed.context("Timed out closing page").and_then(|r| r);
         if closed.is_ok() {
@@ -415,7 +438,7 @@ impl Manager {
                     parent: None,
                     connection: page.connection.clone(),
                 };
-                let _ = self.close(&caller, &page.id).await;
+                let _ = self.close_now(&caller, &page.id).await;
             }
         }
     }
@@ -430,6 +453,20 @@ impl Manager {
 }
 
 impl State {
+    async fn reap_dead(&mut self) {
+        for headed in [false, true] {
+            if self
+                .engines
+                .get(&headed)
+                .is_some_and(|engine| !engine.alive())
+            {
+                self.pages.retain(|_, page| page.headed != headed);
+                if let Some(engine) = self.engines.remove(&headed) {
+                    engine.stop().await;
+                }
+            }
+        }
+    }
     async fn stop_unused(&mut self) {
         for headed in [false, true] {
             if !self.pages.values().any(|p| p.headed == headed)
@@ -445,23 +482,8 @@ impl Page {
         self.last_used.lock().unwrap().elapsed() >= PAGE_IDLE_TIMEOUT
     }
     async fn perform(&self, name: &str, args: &Value, deadline: Duration) -> Result<Value> {
-        let (tool, mut params) = match name {
-            "navigate_page" => {
-                let url = args["url"].as_str().context("url must be a string")?;
-                validate_url(url)?;
-                (
-                    "navigate_page",
-                    json!({"url":url,"type":"url","timeout":deadline.as_millis().saturating_sub(300).max(1) as u64}),
-                )
-            }
-            "inspect_page" => ("take_snapshot", json!({})),
-            "click" => ("click", json!({"uid":args["element"]})),
-            "fill" => ("fill", json!({"uid":args["element"],"value":args["value"]})),
-            "press_key" => ("press_key", json!({"key":args["key"]})),
-            "handle_dialog" => (
-                "handle_dialog",
-                json!({"action":if args["accept"].as_bool().context("accept must be a boolean")? {"accept"}else{"dismiss"}}),
-            ),
+        match name {
+            "navigate_page" => validate_url(args["url"].as_str().context("url must be a string")?)?,
             "set_viewport" => {
                 let w = args["width"].as_u64().context("width must be an integer")?;
                 let h = args["height"]
@@ -470,56 +492,30 @@ impl Page {
                 if !(200..=3840).contains(&w) || !(200..=2160).contains(&h) {
                     bail!("Viewport must be 200–3840 × 200–2160");
                 }
-                ("emulate", json!({"viewport":format!("{w}x{h}x1")}))
             }
-            "take_screenshot" => (
-                "take_screenshot",
-                json!({"format":"png","fullPage":args["full_page"].as_bool().unwrap_or(false)}),
-            ),
-            "evaluate_script" => {
-                let expression = args["expression"]
-                    .as_str()
-                    .context("expression must be a string")?;
-                (
-                    "evaluate_script",
-                    json!({"function":format!("async()=>{{let timer;try{{return await Promise.race([eval({}),new Promise((_,reject)=>{{timer=setTimeout(()=>reject(new Error(\"Operation timed out; outcome may be unknown\")),{})}})])}}finally{{clearTimeout(timer)}}}}",serde_json::to_string(expression)?,deadline.as_millis().saturating_sub(200).max(1)),"dialogAction":"dismiss","waitForStableDom":false}),
-                )
-            }
-            "scroll_page" => {
-                let x = args["x"].as_i64().unwrap_or(0);
-                let y = args["y"].as_i64().context("y must be an integer")?;
-                (
-                    "evaluate_script",
-                    json!({"function":format!("()=>scrollTo({x},{y})"),"dialogAction":"dismiss","waitForStableDom":false}),
-                )
-            }
-            _ => bail!("Unknown browser operation"),
-        };
-        params["pageId"] = json!(self.upstream_id);
-        let result = self.engine.call(tool, params).await?;
-        match name {
-            "inspect_page" => Ok(json!(upstream::text(&result))),
-            "evaluate_script" => {
-                let text = upstream::text(&result);
-                let output = text
-                    .split_once("```json\n")
-                    .and_then(|(_, v)| v.rsplit_once("\n```").map(|(v, _)| v))
-                    .context("Missing DevTools evaluation result")?;
-                if output == "undefined" {
-                    Ok(Value::Null)
-                } else {
-                    Ok(serde_json::from_str(output)?)
+            "press_key" => {
+                let key = args["key"].as_str().context("key must be a string")?;
+                if ![
+                    "Enter",
+                    "Tab",
+                    "Escape",
+                    "Backspace",
+                    "ArrowDown",
+                    "ArrowUp",
+                    "PageDown",
+                    "PageUp",
+                ]
+                .contains(&key)
+                {
+                    bail!("Unsupported key");
                 }
             }
-            "take_screenshot" => {
-                let image = result["content"]
-                    .as_array()
-                    .and_then(|cs| cs.iter().find(|c| c["type"] == "image"))
-                    .context("Missing DevTools screenshot")?;
-                Ok(json!({"image":image["data"]}))
-            }
-            _ => Ok(json!("OK")),
+            _ => {}
         }
+        let mut params = args.clone();
+        params["page_id"] = json!(self.upstream_id);
+        params["timeout"] = json!(deadline.as_millis().saturating_sub(200).max(1) as u64);
+        self.engine.call(name, params).await
     }
 }
 fn validate_url(url: &str) -> Result<()> {
@@ -610,5 +606,20 @@ mod tests {
         manager.expire_idle().await;
         assert_eq!(manager.status().await["page_count"], 0);
         assert_eq!(manager.status().await["browser_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn closing_a_dead_worker_releases_pages_and_allows_updates() {
+        let (manager, page) = setup(false).await;
+        page.engine.stop().await;
+        let caller = Caller {
+            thread: "owner".into(),
+            parent: None,
+            connection: "connection".into(),
+        };
+        manager.close(&caller, "1").await.unwrap();
+        assert_eq!(manager.status().await["page_count"], 0);
+        assert_eq!(manager.status().await["browser_count"], 0);
+        manager.prepare_update().await.unwrap();
     }
 }

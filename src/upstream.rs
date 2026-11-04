@@ -1,19 +1,32 @@
-//! Own a lazy Chrome DevTools MCP connection; browser behavior belongs upstream.
+//! Concurrent private transport to the lazy Puppeteer worker.
 
 use anyhow::{Context, Result, bail};
-use rmcp::{
-    RoleClient, ServiceExt,
-    model::{CallToolRequestParams, CallToolResponse},
-    service::{Peer, RunningService},
-    transport::TokioChildProcess,
-};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc, time::Duration};
-use tokio::{process::Command, sync::Mutex, time::timeout};
+use std::{
+    collections::HashMap,
+    path::Path,
+    process::Stdio,
+    sync::{
+        Arc, Mutex as SyncMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    process::{Child, Command},
+    sync::{Mutex, oneshot},
+    time::timeout,
+};
+
+type Pending = Arc<SyncMutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
 pub struct Engine {
-    peer: Peer<RoleClient>,
-    service: Mutex<Option<RunningService<RoleClient, ()>>>,
+    input: Mutex<Option<Box<dyn AsyncWrite + Send + Unpin>>>,
+    child: Mutex<Option<Child>>,
+    pending: Pending,
+    next: AtomicU64,
+    alive: Arc<AtomicBool>,
 }
 
 impl Engine {
@@ -25,93 +38,123 @@ impl Engine {
     ) -> Result<Arc<Self>> {
         anyhow::ensure!(
             entry.is_file(),
-            "Chrome DevTools MCP runtime is missing; run the installer"
+            "Puppeteer runtime is missing; run the installer"
         );
         anyhow::ensure!(chrome.is_file(), "Dedicated Chrome for Testing is missing");
-        let mut command = Command::new(node);
-        command
+        let mut child = Command::new(node)
             .arg(entry)
-            .args([
-                "--isolated",
-                "--viewport=1440x900",
-                "--experimental-structured-content",
-                "--no-usage-statistics",
-                "--no-performance-crux",
-                "--executable-path",
-            ])
-            .arg(chrome)
-            .env("CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS", "1")
-            .env("CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS", "1");
-        if !headed {
-            command.arg("--headless");
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context("Could not start Puppeteer")?;
+        let input = child.stdin.take().context("Missing worker stdin")?;
+        let output = child.stdout.take().context("Missing worker stdout")?;
+        let engine = Self::connect(input, output, Some(child));
+        let ready = timeout(
+            Duration::from_secs(20),
+            engine.call("init", json!({"chrome":chrome,"headed":headed})),
+        )
+        .await;
+        match ready {
+            Ok(Ok(_)) => Ok(engine),
+            failure => {
+                engine.stop().await;
+                match failure {
+                    Ok(Err(error)) => Err(error),
+                    _ => bail!("Puppeteer initialization timed out"),
+                }
+            }
         }
-        let transport =
-            TokioChildProcess::new(command).context("Could not start Chrome DevTools MCP")?;
-        let service = timeout(Duration::from_secs(20), ().serve(transport))
-            .await
-            .context("DevTools MCP initialization timed out")??;
-        Ok(Arc::new(Self {
-            peer: service.peer().clone(),
-            service: Mutex::new(Some(service)),
-        }))
+    }
+
+    fn connect(
+        input: impl AsyncWrite + Send + Unpin + 'static,
+        output: impl AsyncRead + Send + Unpin + 'static,
+        child: Option<Child>,
+    ) -> Arc<Self> {
+        let pending: Pending = Arc::default();
+        let alive = Arc::new(AtomicBool::new(true));
+        let engine = Arc::new(Self {
+            input: Mutex::new(Some(Box::new(input))),
+            child: Mutex::new(child),
+            pending: pending.clone(),
+            next: AtomicU64::new(1),
+            alive: alive.clone(),
+        });
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(output).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(response) = serde_json::from_str::<Value>(&line) else {
+                    break;
+                };
+                if let Some(id) = response["id"].as_u64()
+                    && let Some(sender) = pending.lock().unwrap().remove(&id)
+                {
+                    let _ = sender.send(response);
+                }
+            }
+            alive.store(false, Ordering::Release);
+            pending.lock().unwrap().clear();
+        });
+        engine
     }
 
     pub fn alive(&self) -> bool {
-        !self.peer.is_transport_closed()
-    }
-
-    pub async fn request(&self, name: &str, args: Value) -> Result<Value> {
-        let response = self
-            .peer
-            .call_tool_once(
-                CallToolRequestParams::new(name.to_owned()).with_arguments(
-                    args.as_object()
-                        .context("Tool arguments must be an object")?
-                        .clone(),
-                ),
-            )
-            .await?;
-        match response {
-            CallToolResponse::Complete(result) => Ok(serde_json::to_value(result)?),
-            _ => bail!("Unexpected incomplete DevTools response"),
-        }
+        self.alive.load(Ordering::Acquire)
     }
 
     pub async fn call(&self, name: &str, args: Value) -> Result<Value> {
-        let result = self.request(name, args).await?;
-        check(&result)?;
-        Ok(result)
+        anyhow::ensure!(self.alive(), "Puppeteer worker stopped; open a new page");
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, sender);
+        // Cancellation must also release requests whose JavaScript never settles.
+        struct RequestGuard(u64, Pending);
+        impl Drop for RequestGuard {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().remove(&self.0);
+            }
+        }
+        let _guard = RequestGuard(id, self.pending.clone());
+        {
+            let mut writer = self.input.lock().await;
+            let input = writer.as_mut().context("Puppeteer worker stopped")?;
+            input
+                .write_all(format!("{}\n", json!({"id":id,"name":name,"args":args})).as_bytes())
+                .await?;
+        }
+        let response = receiver.await.context("Puppeteer worker stopped")?;
+        if let Some(error) = response["error"].as_str() {
+            match response["kind"].as_str() {
+                Some("dialog") => return Err(PendingDialog(error.into()).into()),
+                Some("timeout") => bail!("Operation timed out; outcome may be unknown: {error}"),
+                _ => bail!("{error}"),
+            }
+        }
+        Ok(response["result"].clone())
     }
 
     pub async fn pages(&self) -> Result<Vec<Value>> {
-        let result = timeout(
-            Duration::from_secs(5),
-            self.request("list_pages", json!({})),
-        )
-        .await
-        .context("DevTools page listing timed out")??;
-        anyhow::ensure!(result["isError"] != true, "DevTools could not list pages");
-        Ok(result["structuredContent"]["pages"]
+        let result = timeout(Duration::from_secs(5), self.call("list_pages", json!({})))
+            .await
+            .context("Puppeteer page listing timed out")??;
+        Ok(result
             .as_array()
-            .context("Missing DevTools page list")?
+            .context("Missing Puppeteer page list")?
             .clone())
     }
 
     pub async fn stop(&self) {
-        if let Some(service) = self.service.lock().await.take() {
-            let _ = service.cancel().await;
+        self.alive.store(false, Ordering::Release);
+        self.input.lock().await.take();
+        if let Some(mut child) = self.child.lock().await.take()
+            && timeout(Duration::from_secs(5), child.wait()).await.is_err()
+        {
+            let _ = child.kill().await;
         }
+        self.pending.lock().unwrap().clear();
     }
-}
-
-pub fn text(result: &Value) -> String {
-    result["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| c["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[derive(Debug)]
@@ -123,78 +166,38 @@ impl std::fmt::Display for PendingDialog {
 }
 impl std::error::Error for PendingDialog {}
 
-pub fn check(result: &Value) -> Result<()> {
-    if let Some(dialog) = result["structuredContent"].get("dialog") {
-        return Err(PendingDialog(format!(
-            "JavaScript dialog ({}): {}. Use handle_dialog; do not repeat the original operation",
-            dialog["type"].as_str().unwrap_or("unknown"),
-            dialog["message"].as_str().unwrap_or("")
-        ))
-        .into());
-    }
-    if result["isError"] == true || result["structuredContent"].get("errorMessage").is_some() {
-        bail!(
-            "{}",
-            result["structuredContent"]["errorMessage"]
-                .as_str()
-                .unwrap_or("Chrome DevTools MCP operation failed")
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 pub async fn mock(fail_first: bool) -> Arc<Engine> {
-    use rmcp::{
-        ServerHandler,
-        model::*,
-        service::{RequestContext, RoleServer},
-    };
-    struct Mock {
-        pages: Mutex<Vec<u64>>,
-        fail: std::sync::atomic::AtomicBool,
-    }
-    impl ServerHandler for Mock {
-        fn get_info(&self) -> ServerConfig {
-            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-        }
-        async fn call_tool(
-            &self,
-            request: CallToolRequestParams,
-            _: RequestContext<RoleServer>,
-        ) -> Result<CallToolResponse, rmcp::ErrorData> {
-            let mut pages = self.pages.lock().await;
-            if request.name == "close_page" {
-                let id = request.arguments.as_ref().unwrap()["pageId"]
-                    .as_u64()
-                    .unwrap();
-                pages.retain(|p| *p != id);
-                if self.fail.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    let mut result = CallToolResult::error(vec![]);
-                    result.structured_content = Some(json!({"errorMessage":"test close failure"}));
-                    return Ok(result.into());
-                }
-            }
-            let mut result = CallToolResult::success(vec![]);
-            result.structured_content =
-                Some(json!({"pages":pages.iter().map(|id|json!({"id":id})).collect::<Vec<_>>()}));
-            Ok(result.into())
-        }
-    }
     let (client, server) = tokio::io::duplex(8192);
+    let (input, output) = tokio::io::split(client);
+    let (server_read, mut server_write) = tokio::io::split(server);
     tokio::spawn(async move {
-        let service = Mock {
-            pages: Mutex::new(vec![1, 2, 3]),
-            fail: std::sync::atomic::AtomicBool::new(fail_first),
+        let mut pages = vec![1_u64, 2, 3];
+        let mut fail = fail_first;
+        let mut lines = BufReader::new(server_read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let mut response = json!({"id":request["id"],"result":"OK"});
+            if request["name"] == "close_page" {
+                let id = request["args"]["page_id"].as_u64().unwrap();
+                if fail {
+                    fail = false;
+                    response = json!({"id":request["id"],"error":"test close failure"});
+                } else {
+                    pages.retain(|p| *p != id);
+                }
+            } else {
+                response["result"] =
+                    json!(pages.iter().map(|id| json!({"id":id})).collect::<Vec<_>>());
+            }
+            if server_write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
-        .serve(server)
-        .await
-        .unwrap();
-        let _ = service.waiting().await;
     });
-    let service = ().serve(client).await.unwrap();
-    Arc::new(Engine {
-        peer: service.peer().clone(),
-        service: Mutex::new(Some(service)),
-    })
+    Engine::connect(output, input, None)
 }

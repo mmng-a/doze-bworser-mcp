@@ -35,11 +35,7 @@ impl Service {
             chrome.clone(),
             Duration::from_secs(seconds),
             "node".into(),
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/runtime/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
-            )
-            .into(),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/runtime/worker.mjs").into(),
         ));
         let cancel = CancellationToken::new();
         let app = application(
@@ -48,7 +44,7 @@ impl Service {
                 token: token.clone(),
                 chrome_path: chrome,
                 node_path: "node".into(),
-                devtools_path: "/unused".into(),
+                worker_path: "/unused".into(),
                 operation_timeout_seconds: seconds,
             },
             manager.clone(),
@@ -189,6 +185,35 @@ async fn discovery_is_cold_and_http_access_is_scoped() {
     assert_eq!(service.manager.status().await["browser_count"], 0);
     assert_eq!(
         Client::new()
+            .post(format!("{}/update", service.base))
+            .bearer_auth(&service.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    let blocked = caller.tool("open_page", json!({"url":"about:blank"})).await;
+    assert!(blocked.to_string().contains("updating"), "{blocked}");
+    assert_eq!(
+        Client::new()
+            .delete(format!("{}/update", service.base))
+            .bearer_auth(&service.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert!(
+        !caller
+            .tool("open_page", json!({"url":"about:blank"}))
+            .await
+            .to_string()
+            .contains("updating")
+    );
+    assert_eq!(
+        Client::new()
             .get(format!("{}/health", service.base))
             .send()
             .await
@@ -265,6 +290,17 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
     let pb = opened["page_id"].as_str().unwrap().to_string();
     assert_eq!(service.manager.status().await["browser_count"], 1);
     assert_eq!(
+        Client::new()
+            .post(format!("{}/update", service.base))
+            .bearer_auth(&service.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+
+    assert_eq!(
         a.ok("list_pages", json!({}))
             .await
             .as_array()
@@ -321,6 +357,16 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
         })
     };
     tokio::time::sleep(Duration::from_millis(60)).await;
+    let parallel = Instant::now();
+    assert_eq!(
+        b.ok("evaluate_script", json!({"page_id":pb,"expression":"42"}))
+            .await,
+        42
+    );
+    assert!(
+        parallel.elapsed() < Duration::from_millis(250),
+        "JavaScript on another page was serialized"
+    );
     assert_eq!(
         a.ok(
             "evaluate_script",
@@ -386,12 +432,21 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
         json!({"page_id":pa,"expression":"setTimeout(()=>alert('Delayed alert'),150);true"}),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let started = Instant::now();
-    let dialog = a.tool("inspect_page", json!({"page_id":pa})).await;
-    assert_eq!(dialog["isError"], true);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let dialog = loop {
+        let started = Instant::now();
+        let result = a.tool("inspect_page", json!({"page_id":pa})).await;
+        if result["isError"] == true {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            break result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Delayed alert did not open: {result}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    };
     assert!(dialog.to_string().contains("Delayed alert"));
-    assert!(started.elapsed() < Duration::from_secs(1));
     a.ok("handle_dialog", json!({"page_id":pa,"accept":true}))
         .await;
     assert_eq!(
@@ -485,6 +540,22 @@ async fn timed_out_page_is_closed_without_blocking_other_pages() {
             .await,
         42
     );
+    let pc = a.ok("open_page", json!({"url":"about:blank"})).await["page_id"].clone();
+    let result = a
+        .tool(
+            "navigate_page",
+            json!({"page_id":pc,"url":format!("{url}slow")}),
+        )
+        .await;
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        a.ok("list_pages", json!({}))
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     a.ok("close_page", json!({"page_id":pb})).await;
     a.finish().await;
     stop.cancel();
@@ -493,7 +564,7 @@ async fn timed_out_page_is_closed_without_blocking_other_pages() {
 
 #[tokio::test]
 #[ignore = "launches the explicitly configured dedicated headless Chrome for Testing"]
-async fn devtools_handles_editable_text_enter_closed_tabs_and_initial_dialogs() {
+async fn puppeteer_handles_editable_text_enter_closed_tabs_and_initial_dialogs() {
     let chrome = std::env::var_os("DOZE_BROWSER_CHROME").expect("Set DOZE_BROWSER_CHROME");
     let service = Service::start(chrome.into(), 5).await;
     let (url, stop) = fixture().await;
@@ -598,6 +669,100 @@ async fn devtools_handles_editable_text_enter_closed_tabs_and_initial_dialogs() 
     a.ok("close_page", json!({"page_id":p})).await;
     assert_eq!(service.manager.status().await["browser_count"], 0);
     a.finish().await;
+    stop.cancel();
+    service.manager.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "launches the explicitly configured dedicated headless Chrome for Testing"]
+async fn errors_dialogs_large_images_and_context_disposal_are_page_scoped() {
+    let chrome = std::env::var_os("DOZE_BROWSER_CHROME").expect("Set DOZE_BROWSER_CHROME");
+    let service = Service::start(chrome.into(), 5).await;
+    let (url, stop) = fixture().await;
+    let a = service.caller("private-a").await;
+    let b = service.caller("private-b").await;
+    let pb = b.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    let pa = a.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    a.ok(
+        "evaluate_script",
+        json!({"page_id":pa,"expression":"setTimeout(()=>alert('ROOT_A_SECRET'),50);true"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(b.ok("close_page", json!({"page_id":pb})).await, "OK");
+    a.ok("handle_dialog", json!({"page_id":pa,"accept":false}))
+        .await;
+    a.ok("evaluate_script", json!({"page_id":pa,"expression":"localStorage.setItem('secret','a');document.cookie='secret=a';true"})).await;
+    let pb = b.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    a.ok("close_page", json!({"page_id":pa})).await;
+    let pa = a.ok("open_page", json!({"url":url})).await["page_id"].clone();
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":pa,"expression":"[localStorage.getItem('secret'),document.cookie]"})
+        )
+        .await,
+        json!([null, ""])
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_url = format!("http://{}/", listener.local_addr().unwrap());
+    drop(listener);
+    let result = a
+        .tool("navigate_page", json!({"page_id":pa,"url":dead_url}))
+        .await;
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        a.tool("open_page", json!({"url":dead_url})).await["isError"],
+        true
+    );
+    assert_eq!(
+        a.ok("list_pages", json!({}))
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    a.ok("navigate_page", json!({"page_id":pa,"url":url})).await;
+    a.ok("evaluate_script", json!({"page_id":pa,"expression":r#"(() => {
+        const canvas = document.createElement('canvas'); canvas.width=1400; canvas.height=800;
+        document.body.replaceChildren(canvas);
+        const ctx=canvas.getContext('2d'), image=ctx.createImageData(1400,800);
+        for(let i=0;i<image.data.length;i+=65536) crypto.getRandomValues(image.data.subarray(i,i+65536));
+        for(let i=3;i<image.data.length;i+=4) image.data[i]=255;
+        ctx.putImageData(image,0,0); return true;
+    })()"#})).await;
+    let screenshot = a.tool("take_screenshot", json!({"page_id":pa})).await;
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(screenshot["content"][0]["data"].as_str().unwrap())
+        .unwrap();
+    assert!(
+        png.len() >= 2_000_000,
+        "fixture must exceed the previous upstream threshold"
+    );
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    a.ok("evaluate_script", json!({"page_id":pa,"expression":"setTimeout(()=>{const end=Date.now()+1500;while(Date.now()<end){}},50);true"})).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let started = Instant::now();
+    assert_eq!(
+        b.ok("list_pages", json!({}))
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(800),
+        "Listing another root waited for a blocked renderer"
+    );
+    a.ok("close_page", json!({"page_id":pa})).await;
+    b.ok("close_page", json!({"page_id":pb})).await;
+    assert_eq!(service.manager.status().await["browser_count"], 0);
+    a.finish().await;
+    b.finish().await;
     stop.cancel();
     service.manager.shutdown().await;
 }
