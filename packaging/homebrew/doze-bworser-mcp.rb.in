@@ -38,11 +38,14 @@ class DozeBworserMcp < Formula
     require "json"
 
     assert_match version.to_s, shell_output("#{bin}/doze-bworser-mcp --version")
-    ENV["HOME"] = testpath
+    config = testpath/"config.json"
+    config.write JSON.generate({ token: "a" * 64, socket_path: (testpath/"ipc.sock").to_s,
+                                 node_path: (formula_opt_bin("node")/"node").to_s,
+                                 daemon_path: (libexec/"runtime/daemon.mjs").to_s, chrome_path: "unused" })
     request = { jsonrpc: "2.0", id: 1, method: "initialize",
                 params: { protocolVersion: "2025-11-25", capabilities: {},
                           clientInfo: { name: "brew-test", version: "1" } } }
-    IO.popen([bin/"doze-bworser-mcp"], "r+") do |pipe|
+    IO.popen([bin/"doze-bworser-mcp", "proxy", "--config", config], "r+") do |pipe|
       pipe.puts JSON.generate(request)
       pipe.flush
       response = JSON.parse(pipe.gets)
