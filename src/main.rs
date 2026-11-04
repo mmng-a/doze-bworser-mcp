@@ -1,81 +1,49 @@
 use anyhow::{Context, Result, bail};
-use doze_bworser_mcp::server::{default_config_path, read_config, serve};
+use doze_bworser_mcp::{connection, default_config_path, proxy, read_config, supervise};
 use serde_json::{Value, json};
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{io::Read, path::PathBuf};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.is_empty() || args[0] == "--help" {
+    if args.first().is_some_and(|arg| arg == "--help") {
         println!(
-            "doze-bworser-mcp serve|hook [--config PATH]\nShared local HTTP MCP; Chromium starts on first browser operation."
+            "doze-bworser-mcp [proxy|hook|status|stop] [--config PATH]\nOne shared Node MCP endpoint, started on demand through local IPC."
         );
         return Ok(());
     }
-    if args[0] == "--version" {
+    if args.first().is_some_and(|arg| arg == "--version") {
         println!("doze-bworser-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let path = if args.len() == 3 && args[1] == "--config" {
-        PathBuf::from(&args[2])
-    } else if args.len() == 1 {
-        default_config_path()
-    } else {
-        bail!("Expected serve|hook [--config PATH]")
+    let command = args.first().map(String::as_str).unwrap_or("proxy");
+    let path = match args.as_slice() {
+        [] | [_] => default_config_path(),
+        [_, flag, path] if flag == "--config" => PathBuf::from(path),
+        _ => bail!("Expected [proxy|hook|status|stop] [--config PATH]"),
     };
-    match args[0].as_str() {
-        "serve" => serve(read_config(&path)?).await,
+    let config = read_config(&path)?;
+    match command {
+        "proxy" => proxy(&path, &config).await,
+        "supervise" => supervise(&path, &config),
         "hook" => {
             let mut text = String::new();
             std::io::stdin().read_to_string(&mut text)?;
             let payload: Value = serde_json::from_str(&text)?;
-            let config = read_config(&path)?;
-            let thread = payload["session_id"]
+            payload["session_id"]
                 .as_str()
                 .context("Hook is missing session_id")?;
-            let (event, thread, parent) = match payload["hook_event_name"].as_str() {
-                Some("SessionStart") => ("start", thread, None),
-                Some("SubagentStart") => (
-                    "start",
-                    payload["agent_id"]
-                        .as_str()
-                        .context("Hook is missing agent_id")?,
-                    Some(thread),
-                ),
-                Some("SessionEnd") => ("end", thread, None),
-                _ => bail!("Unsupported lifecycle hook"),
-            };
-            let body = json!({"event":event,"thread":thread,"parent":parent}).to_string();
-            let mut socket = TcpStream::connect_timeout(
-                &format!("127.0.0.1:{}", config.port).parse()?,
-                Duration::from_secs(1),
-            )?;
-            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-            socket.set_write_timeout(Some(Duration::from_secs(1)))?;
-            write!(
-                socket,
-                "POST /lifecycle HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                config.port,
-                config.token,
-                body.len(),
-                body
-            )?;
-            let mut response = String::new();
-            socket.read_to_string(&mut response)?;
-            if !response.starts_with("HTTP/1.1 204") {
-                bail!("Browser lifecycle update failed");
-            }
+            connection(&path, &config, "hook", payload.clone(), true).await?;
             if payload["hook_event_name"] == "SessionStart" {
                 println!(
                     "{}",
-                    json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Use doze-bworser-mcp tools for browser operations. The shared service starts Chromium only when needed. Always pass page_id; different pages run concurrently. Use headed only for explicit joint viewing. Formal project capture/check CLIs take precedence."}})
+                    json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Use doze-bworser-mcp tools for browser operations. Chromium starts only when needed. Always pass page_id; different pages run concurrently. Use headed only for explicit joint viewing. Formal project capture/check CLIs take precedence."}})
                 );
             }
+            Ok(())
+        }
+        "status" | "stop" => {
+            connection(&path, &config, command, Value::Null, false).await?;
             Ok(())
         }
         _ => bail!("Unknown command"),

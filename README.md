@@ -2,73 +2,81 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
-A local MCP service that shares one lazily started Chrome for Testing across Codex threads. Discovery does not start a browser. Operations, including JavaScript evaluation, run concurrently across pages. Operations on one page run in order. Calls return completed results.
+A local MCP endpoint that shares a dedicated Chrome for Testing across Codex threads. Different pages run concurrently; operations on one page run in order. Each call waits for completion, except an operation interrupted by a JavaScript dialog: respond with `handle_dialog` without repeating the operation.
 
-## Requirements
+## Architecture
 
-- macOS, Rust 1.88 or later to build, and Python 3.11 or later for installation.
-- Node.js 22.12.0 or later, plus npm.
-- A dedicated Google Chrome for Testing executable. The normal user browser is never selected automatically.
-- A Codex client with Streamable HTTP MCP support.
+| Component | Responsibility | Lifetime |
+| --- | --- | --- |
+| Rust stdio launcher | Start or find the shared service, authenticate, forward bytes | One per MCP connection |
+| Shared Rust supervisor | Hold the OS file lock and wait for Node | One per running service |
+| Shared Node endpoint | Official MCP SDK, Puppeteer, ownership, queues, cancellation | Until the last connection closes, then a short cleanup delay |
+| Dedicated Chromium | Render and operate pages | First `open_page` through last page closure |
 
-Only the Rust broker runs while unused. The first browser operation starts one shared Node.js Puppeteer worker and Chromium; the final closed page stops both. Browser automation and accessibility data use puppeteer-core 25.16.0 public APIs. Page listing obtains browser-side URL/title metadata through Puppeteer’s public CDP sessions. Headless browsing shares one Chromium instance. Explicit joint viewing uses a separate headed instance.
+Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or lifecycle/status controls. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
 
-Sandboxed clients connect over HTTP MCP. Chromium starts under the LaunchAgent, outside the command sandbox. Environments that prohibit loopback connections cannot use this service.
+Normal headless pages share one browser globally per OS user. Explicit joint viewing uses one separate headed browser. Storage is isolated by root thread; each caller owns its own pages. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
 
-## Install
+## Requirements and installation
+
+- macOS, Linux, or Windows; Rust 1.89+ to build and Python 3.11+ to install.
+- Node.js 22.12.0+ and npm.
+- A dedicated Chrome for Testing executable. The user's ordinary browser is never selected automatically.
+- A Codex client supporting stdio MCP and lifecycle hooks.
 
 ```sh
 cargo build --release --locked
-python3 scripts/install.py
+python3 scripts/install.py --chrome '/absolute/path/to/dedicated/chrome'
 ```
 
-The installer uses the existing dedicated Chrome for Testing at `~/.local/share/codex-browser/chrome/current/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`. Set `chrome_path` in `~/.config/doze-bworser-mcp/config.json` for another dedicated installation.
+Use `python` on Windows if that is your Python command. Subsequent installs reuse the configured Chrome path and may omit `--chrome`.
 
-The installer prepares pinned Puppeteer dependencies and the worker under `~/.local/share/doze-bworser-mcp/runtimes/<version>`. It prepares a separate directory before pausing the idle service and switching versions. Existing runtime files are not overwritten.
+The installer copies the launcher to `~/.local/bin`, prepares a pinned, immutable Node runtime under `~/.local/share/doze-bworser-mcp/runtimes`, and registers the stdio command and lifecycle hooks in Codex. Settings and authentication credentials are private under `~/.config/doze-bworser-mcp`; do not publish them. Unrelated Codex settings are preserved, with backups before changes. Reload existing threads' MCP configuration; changed hooks may require trust through `/hooks`.
 
-Installation registers the `com.masasam.doze-bworser-mcp` LaunchAgent, an authenticated loopback HTTP MCP in `~/.codex/config.toml`, and lifecycle hooks. The service starts at login and remains available without Chromium until a browser tool needs it. The default port is 45917. The access token is stored in private configuration files; do not publish those files.
+Before updating, close MCP connections using the service. The installer refuses to replace a running service and holds the same native lock as its supervisor during replacement. It does not overwrite existing runtime directories. The old HTTP/LaunchAgent version must be stopped and its service registration removed before migration; remove its `port` setting after stopping it. This installer does not manage OS services.
 
-Existing Codex threads may need their MCP configuration reloaded. Newly changed hook definitions may need to be trusted using `/hooks`. The installer preserves unrelated settings and saves the previous Codex configuration and hooks in the private settings directory. It replaces old codex-browser startup hooks but retains its end hook to clean up pre-existing sessions.
+```sh
+doze-bworser-mcp status
+doze-bworser-mcp stop
+```
 
-## Use
+`status` reports connection, page, and browser counts. `stop` refuses while MCP connections or pages remain. Both report an error when the service is absent. The next MCP connection starts the service automatically.
 
-Before updating the installed service, close its managed pages. The installer atomically refuses updates while pages are active and blocks new pages until the update completes. Installations predating the `/update` endpoint require a one-time service stop before updating. If an update is interrupted, rerun the installer. With no active pages, it resumes even if the service was left paused.
+The MCP launcher normally runs in the host client's tool environment, so browser operations do not require shell access to Chromium from a coding sandbox. MCP does not remove OS restrictions or tool approval requirements. A host that sandboxes the MCP process itself must permit its executable, local IPC, and browser startup.
 
-1. Call `open_page` with an HTTP(S) URL and optional `headed: true` for explicit joint viewing.
-2. Pass the returned `page_id` to every page operation.
-3. Use `inspect_page` to read the DevTools-style accessibility tree. Pass a displayed `uid` as `element` to `click` or `fill`.
-4. Use `take_screenshot` to receive an image. Project-provided capture and audit CLIs remain the preferred way to produce their formal artifacts.
-5. Call `close_page` when finished.
+## Tools
 
-Tools: `open_page`, `list_pages`, `inspect_page`, `navigate_page`, `click`, `fill`, `press_key`, `scroll_page`, `set_viewport`, `take_screenshot`, `evaluate_script`, `handle_dialog`, `close_page`.
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `open_page` | `url`, optional `headed` | `{ "page_id": "…" }` |
+| `list_pages` | None | Own pages with IDs, URLs, titles |
+| `inspect_page` | `page_id` | DevTools-style accessibility text with `uid` references |
+| `navigate_page` | `page_id`, `url` | `OK` after DOM readiness |
+| `click` | `page_id`, `element` | `OK` |
+| `fill` | `page_id`, `element`, `value` | `OK` |
+| `press_key` | `page_id`, `key` | `OK` |
+| `scroll_page` | `page_id`, `y`, optional `x` | `OK` |
+| `set_viewport` | `page_id`, `width`, `height` | `OK` |
+| `take_screenshot` | `page_id`, optional `full_page` | PNG image |
+| `evaluate_script` | `page_id`, `expression` | JSON result, awaiting returned promises |
+| `handle_dialog` | `page_id`, `accept` | `OK` after the interrupted operation settles, or the next dialog |
+| `close_page` | `page_id` | `OK` after closure |
 
-`headed: true` is only for explicit joint viewing. It opens an automation-owned window and does not attach to a user's existing browser. `set_viewport` changes page emulation, not the user window size.
+Results use MCP `content` only. URLs must be HTTP(S) or `about:blank`. Public schemas and argument validation come from the same Zod definitions through the official MCP SDK; strings such as `"false"` are not accepted as booleans.
 
-Tool arguments are type-checked before executing an operation. For example, `handle_dialog.accept` accepts only a boolean; the string `"false"` and `null` are rejected.
+Use `inspect_page` before element operations. Only references from the latest completed inspection are valid. Native HTML options use Puppeteer's selection API; disabled or ambiguous options return errors. Custom widgets use normal clicks. The initial viewport is 1440×900; viewport emulation does not resize the user's window. Headed mode is only for explicit joint viewing. Formal project capture/check CLIs take precedence for deliverables.
 
-Clicking a native HTML `<option>` uses Puppeteer’s selection API on its parent `<select>`, firing `input` and `change` events. Disabled options and ambiguous duplicate values return errors. Custom selection widgets retain ordinary clicks.
+## Operation and cleanup
 
-Results use MCP `content` only: `open_page` returns `page_id`; `list_pages` returns an array of IDs, URLs and titles; `inspect_page` returns text; `take_screenshot` returns an image; `evaluate_script` returns its JSON result; other operations return `OK`. Pages start at 1440×900; use `set_viewport` to change the size.
+- Caller identity comes from Codex metadata, not model-supplied arguments. Hooks and parent metadata identify root threads. Non-Codex clients are isolated per connection. Disconnecting closes that connection's pages; ending a root thread closes its descendants' pages.
+- Pages idle for 30 minutes close automatically, including pages waiting for a dialog. Active operations are bounded separately. Old page IDs are never reassigned; open a new page after closure.
+- Queue waiting and active execution each default to 20 seconds. Queued canceled or expired calls do not execute. Active cancellation or timeout closes the uncertain page; external effects may already have happened. Calls are never retried automatically.
+- A dialog response does not release the page's operation slot. The original operation stays tracked, its execution deadline pauses during dialog input, and ordinary operations cannot overlap it. `handle_dialog` resumes and waits for it. A dialog during `open_page` reports the retained `page_id` in the error.
+- `close_page` interrupts active work. Cancellation before closure begins leaves the page alone; once begun, closure continues to completion. If page allocation cannot be canceled safely or page cleanup hangs, the affected dedicated browser is terminated, losing its other pages too.
+- Closing the last page stops the corresponding Chromium and removes its temporary profile. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed.
+- A successful input operation is not proof that an external business action succeeded. Check the resulting page when necessary.
 
-Inspection reads Puppeteer’s accessibility snapshot, adds page-local element references, and uses the Apache-2.0 text formatter adapted from Chrome DevTools MCP 1.12.0. Only the latest inspection’s references are accepted; Puppeteer resolves their elements and rejects references from a navigated document. No DevTools MCP server or private Puppeteer API is used.
-
-## Ownership and completion
-
-Codex thread identity comes from request metadata, not model-provided arguments. Parent/child metadata and lifecycle hooks associate related threads with one isolated browser context. Each caller can list and operate only its own pages. A non-Codex MCP client is scoped to its MCP connection. Closing an MCP connection removes that connection's pages, leaving other connections in use. Ending a parent thread closes that parent's managed pages and those of its children. Closing the final page stops the corresponding dedicated browser.
-
-Puppeteer handles navigation and element readiness. Input operations report action completion, not proof of a downstream business result. Inspect the resulting page to verify that result. Use uid values from the latest `inspect_page`; Puppeteer manages element handles. The accessibility tree includes input values and states exposed by Chromium.
-
-Pages idle for at least 30 minutes are closed periodically. Operations in progress are excluded. A closed page returns an error asking you to open a new page.
-
-Dialogs opened during `evaluate_script` are dismissed. A dialog during a newly opened page leaves the page available; its error includes `page_id`.
-
-If a JavaScript dialog is open, operations return an error with its message. Call `handle_dialog` to accept or dismiss it, then inspect the result without repeating the original action.
-
-The default waiting and operation deadlines are 20 seconds each. A request that expires while waiting for a page is not executed. If a running request times out or is cancelled, its page is closed to prevent subsequent work using an uncertain page state; external effects may already have happened. The operation is never automatically retried. If a page cannot be closed, its shared worker is stopped, losing all pages owned by that worker. Browser crashes lose the affected pages; stale IDs are not reassigned.
-
-The service binds only to `127.0.0.1`, requires bearer authentication and validates Host and Origin. The service runs with its own OS permissions; MCP does not remove operating-system or Codex tool approval controls. Only the dedicated browser and its temporary profiles are managed.
-
-## Verify
+## Validation and CI
 
 ```sh
 cargo fmt --check
@@ -77,13 +85,9 @@ cargo test --locked
 npm ci --ignore-scripts --prefix runtime
 npm test --prefix runtime
 python3 -m unittest discover -s scripts -p 'test_*.py'
-DOZE_BROWSER_CHROME='/absolute/path/to/Chrome for Testing executable' cargo test --locked --test service -- --ignored --test-threads=1
+DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' cargo test --locked --test service
 ```
 
-The real-browser tests use a local fixture and a dedicated headless browser. They cover shared startup, cookie/storage isolation, page ownership, concurrent navigation, ordering within a page, input, screenshot output, connection cleanup and timeout cleanup.
+Default tests check concurrent cold startup, SDK schemas, ownership metadata, native locks, installer preservation, queue cancellation, dialog ordering, and cleanup without starting Chrome. The optional real-browser test uses a local fixture and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation.
 
-CI runs formatting, Clippy and the ordinary Rust, Node.js and installer test suites on pushes and pull requests. Real-browser tests are explicit opt-in checks. There is no automatic deployment or release workflow. Development uses the current branch unless a task specifies another branch.
-
-## License
-
-MIT. The adapted snapshot formatter is Apache-2.0; see [its attribution and license](runtime/vendor/README.md).
+CI runs formatting, Clippy, Rust, Node and installer checks on macOS, Linux and Windows for pushes and pull requests. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
