@@ -182,6 +182,20 @@ async fn discovery_is_cold_and_http_access_is_scoped() {
         2
     );
     assert_eq!(caller.ok("list_pages", json!({})).await, json!([]));
+    for (name, args) in [
+        (
+            "handle_dialog",
+            json!({"page_id":"missing","accept":"false"}),
+        ),
+        ("open_page", json!({"url":"about:blank","headed":"false"})),
+    ] {
+        let invalid = caller.tool(name, args).await;
+        assert_eq!(invalid["isError"], true);
+        assert!(
+            invalid.to_string().contains("Invalid tool arguments"),
+            "{invalid}"
+        );
+    }
     assert_eq!(service.manager.status().await["browser_count"], 0);
     assert_eq!(
         Client::new()
@@ -195,6 +209,17 @@ async fn discovery_is_cold_and_http_access_is_scoped() {
     );
     let blocked = caller.tool("open_page", json!({"url":"about:blank"})).await;
     assert!(blocked.to_string().contains("updating"), "{blocked}");
+    // A new installer can resume a pause left behind without a matching DELETE.
+    assert_eq!(
+        Client::new()
+            .post(format!("{}/update", service.base))
+            .bearer_auth(&service.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
     assert_eq!(
         Client::new()
             .delete(format!("{}/update", service.base))
@@ -764,5 +789,115 @@ async fn errors_dialogs_large_images_and_context_disposal_are_page_scoped() {
     a.finish().await;
     b.finish().await;
     stop.cancel();
+    service.manager.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "launches the explicitly configured dedicated headless Chrome for Testing"]
+async fn native_options_and_dialog_arguments_preserve_the_requested_action() {
+    let chrome = std::env::var_os("DOZE_BROWSER_CHROME").expect("Set DOZE_BROWSER_CHROME");
+    let service = Service::start(chrome.into(), 3).await;
+    let a = service.caller("selection").await;
+    let page = a.ok("open_page", json!({"url":"about:blank"})).await["page_id"].clone();
+    a.ok("evaluate_script", json!({"page_id":page,"expression":r#"(() => {
+        document.body.innerHTML = `<select id="single" aria-label="Single"><option value="a">Single first</option><option value="b">Single second</option></select>
+          <select id="multi" multiple aria-label="Multiple"><option value="a" selected>Multi first</option><option value="b">Multi second</option></select>
+          <select id="disabled" aria-label="Disabled"><option value="a">Enabled first</option><option value="b">Disabled second</option></select>
+          <select id="duplicate" aria-label="Duplicate"><option value="same">Duplicate first</option><option value="same">Duplicate second</option></select>
+          <div role="listbox" aria-label="Custom"><div role="option" tabindex="0" onclick="globalThis.customChoice=true">Custom choice</div></div>
+          <button onclick="globalThis.dialogResult=confirm('Confirm selection?')">Confirm</button>`;
+        globalThis.events={input:0,change:0};
+        for (const name of ['input','change']) document.addEventListener(name,()=>globalThis.events[name]++);
+        return true;
+    })()"#})).await;
+    let snapshot = a.ok("inspect_page", json!({"page_id":page})).await;
+    let uid = |label: &str| {
+        snapshot
+            .as_str()
+            .unwrap()
+            .lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("Missing {label}: {snapshot}"))
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .strip_prefix("uid=")
+            .unwrap()
+            .to_string()
+    };
+    a.ok(
+        "click",
+        json!({"page_id":page,"element":uid("option \"Single second\"")}),
+    )
+    .await;
+    a.ok(
+        "click",
+        json!({"page_id":page,"element":uid("option \"Multi second\"")}),
+    )
+    .await;
+    assert_eq!(a.ok("evaluate_script", json!({"page_id":page,"expression":"({single:document.querySelector('#single').value,multi:[...document.querySelector('#multi').selectedOptions].map(o=>o.value),events:globalThis.events})"})).await,
+        json!({"single":"b","multi":["b"],"events":{"input":2,"change":2}}));
+    a.ok("evaluate_script", json!({"page_id":page,"expression":"document.querySelector('#disabled').options[1].disabled=true;true"})).await;
+    for (label, message) in [
+        ("option \"Disabled second\"", "disabled"),
+        ("option \"Duplicate second\"", "ambiguous"),
+    ] {
+        let rejected = a
+            .tool("click", json!({"page_id":page,"element":uid(label)}))
+            .await;
+        assert_eq!(rejected["isError"], true, "{rejected}");
+        assert!(rejected.to_string().contains(message), "{rejected}");
+    }
+    assert_eq!(a.ok("evaluate_script", json!({"page_id":page,"expression":"({disabled:document.querySelector('#disabled').selectedIndex,duplicate:document.querySelector('#duplicate').selectedIndex,events:globalThis.events})"})).await,
+        json!({"disabled":0,"duplicate":0,"events":{"input":2,"change":2}}));
+    a.ok(
+        "click",
+        json!({"page_id":page,"element":uid("option \"Custom choice\"")}),
+    )
+    .await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":page,"expression":"globalThis.customChoice"})
+        )
+        .await,
+        true
+    );
+    assert_eq!(
+        a.tool(
+            "click",
+            json!({"page_id":page,"element":uid("button \"Confirm\"")})
+        )
+        .await["isError"],
+        true
+    );
+    for invalid in [json!("false"), Value::Null, json!(1)] {
+        let rejected = a
+            .tool("handle_dialog", json!({"page_id":page,"accept":invalid}))
+            .await;
+        assert_eq!(rejected["isError"], true);
+        assert!(
+            rejected.to_string().contains("Invalid tool arguments"),
+            "{rejected}"
+        );
+    }
+    let pending = a.tool("inspect_page", json!({"page_id":page})).await;
+    assert!(
+        pending.to_string().contains("Confirm selection?"),
+        "{pending}"
+    );
+    a.ok("handle_dialog", json!({"page_id":page,"accept":false}))
+        .await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":page,"expression":"globalThis.dialogResult"})
+        )
+        .await,
+        false
+    );
+    a.ok("close_page", json!({"page_id":page})).await;
+    assert_eq!(service.manager.status().await["browser_count"], 0);
+    a.finish().await;
     service.manager.shutdown().await;
 }

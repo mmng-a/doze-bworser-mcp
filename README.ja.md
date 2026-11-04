@@ -32,7 +32,7 @@ python3 scripts/install.py
 
 ## 使い方
 
-更新前には、サービスが管理するタブを閉じてください。インストーラーはタブの有無の確認と新規タブの受付停止を同時に行い、使用中なら更新しません。`/update` に対応していない旧版からの初回更新では、先にサービスを停止する必要があります。
+更新前には、サービスが管理するタブを閉じてください。インストーラーはタブの有無の確認と新規タブの受付停止を同時に行い、使用中なら更新しません。`/update` に対応していない旧版からの初回更新では、先にサービスを停止する必要があります。更新処理が中断された場合はインストーラーを再実行してください。タブが空なら、残っている受付停止状態から更新を再開できます。
 
 1. `open_page` にHTTP(S)のURLを渡します。画面表示が必要な共同操作では `headed: true` を指定します。
 2. 返された `page_id` を、以後のすべてのページ操作に渡します。
@@ -43,6 +43,10 @@ python3 scripts/install.py
 利用できるツールは `open_page`、`list_pages`、`inspect_page`、`navigate_page`、`click`、`fill`、`press_key`、`scroll_page`、`set_viewport`、`take_screenshot`、`evaluate_script`、`handle_dialog`、`close_page` です。
 
 `headed: true` は明示された共同操作にだけ使います。自動操作専用のウインドウを開き、利用者の既存ブラウザには接続しません。`set_viewport` はページの表示条件を変更し、利用者のウインドウはリサイズしません。
+
+ツールの引数は操作前に型を検証します。例えば `handle_dialog` の `accept` は真偽値だけを受け付け、文字列の `"false"` や `null` は拒否します。
+
+HTMLの `<option>` に対する `click` は、Puppeteerの選択APIで親の `<select>` を更新し、`input`・`change` イベントを発生させます。無効化された選択肢や、値が重複して対象を一意に選べない場合はエラーにします。独自の選択UIには通常のクリックを使います。
 
 操作結果はMCPの `content` だけで返します。`open_page` は `page_id`、`list_pages` はID・URL・タイトルの配列、`inspect_page` はテキスト、`take_screenshot` は画像、`evaluate_script` は評価結果のJSON、それ以外は `OK` を返します。ページの初期表示サイズは1440×900です。変更する場合は `set_viewport` を使います。
 

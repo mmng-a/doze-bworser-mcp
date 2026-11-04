@@ -32,7 +32,7 @@ Existing Codex threads may need their MCP configuration reloaded. Newly changed 
 
 ## Use
 
-Before updating the installed service, close its managed pages. The installer atomically refuses updates while pages are active and blocks new pages until the update completes. Installations predating the `/update` endpoint require a one-time service stop before updating.
+Before updating the installed service, close its managed pages. The installer atomically refuses updates while pages are active and blocks new pages until the update completes. Installations predating the `/update` endpoint require a one-time service stop before updating. If an update is interrupted, rerun the installer. With no active pages, it resumes even if the service was left paused.
 
 1. Call `open_page` with an HTTP(S) URL and optional `headed: true` for explicit joint viewing.
 2. Pass the returned `page_id` to every page operation.
@@ -43,6 +43,10 @@ Before updating the installed service, close its managed pages. The installer at
 Tools: `open_page`, `list_pages`, `inspect_page`, `navigate_page`, `click`, `fill`, `press_key`, `scroll_page`, `set_viewport`, `take_screenshot`, `evaluate_script`, `handle_dialog`, `close_page`.
 
 `headed: true` is only for explicit joint viewing. It opens an automation-owned window and does not attach to a user's existing browser. `set_viewport` changes page emulation, not the user window size.
+
+Tool arguments are type-checked before executing an operation. For example, `handle_dialog.accept` accepts only a boolean; the string `"false"` and `null` are rejected.
+
+Clicking a native HTML `<option>` uses Puppeteer’s selection API on its parent `<select>`, firing `input` and `change` events. Disabled options and ambiguous duplicate values return errors. Custom selection widgets retain ordinary clicks.
 
 Results use MCP `content` only: `open_page` returns `page_id`; `list_pages` returns an array of IDs, URLs and titles; `inspect_page` returns text; `take_screenshot` returns an image; `evaluate_script` returns its JSON result; other operations return `OK`. Pages start at 1440×900; use `set_viewport` to change the size.
 

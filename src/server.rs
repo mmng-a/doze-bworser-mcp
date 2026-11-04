@@ -47,6 +47,75 @@ fn default_timeout() -> u64 {
     20
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(
+    tag = "name",
+    content = "arguments",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum ToolInput {
+    OpenPage {
+        url: String,
+        #[serde(default)]
+        headed: bool,
+    },
+    ListPages {},
+    ClosePage {
+        page_id: String,
+    },
+    NavigatePage {
+        page_id: String,
+        url: String,
+    },
+    InspectPage {
+        page_id: String,
+    },
+    Click {
+        page_id: String,
+        element: String,
+    },
+    Fill {
+        page_id: String,
+        element: String,
+        value: String,
+    },
+    PressKey {
+        page_id: String,
+        key: String,
+    },
+    ScrollPage {
+        page_id: String,
+        y: i64,
+        #[serde(default)]
+        x: i64,
+    },
+    SetViewport {
+        page_id: String,
+        width: u64,
+        height: u64,
+    },
+    TakeScreenshot {
+        page_id: String,
+        #[serde(default)]
+        full_page: bool,
+    },
+    EvaluateScript {
+        page_id: String,
+        expression: String,
+    },
+    HandleDialog {
+        page_id: String,
+        accept: bool,
+    },
+}
+
+fn checked_arguments(name: &str, arguments: Value) -> Result<Value> {
+    let input: ToolInput = serde_json::from_value(json!({"name":name,"arguments":arguments}))
+        .context("Invalid tool arguments")?;
+    Ok(serde_json::to_value(input)?["arguments"].take())
+}
+
 #[derive(Clone)]
 struct BrowserService {
     lease: Arc<Lease>,
@@ -104,6 +173,7 @@ impl ServerHandler for BrowserService {
         let args = Value::Object(request.arguments.unwrap_or_default());
         let manager = &self.lease.manager;
         let result: Result<Value> = async {
+            let args = checked_arguments(name, args)?;
             manager.register(&caller).await?;
             match name {
                 "open_page" => {
@@ -449,4 +519,75 @@ pub fn read_config(path: &std::path::Path) -> Result<Config> {
 pub fn default_config_path() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
         .join(".config/doze-bworser-mcp/config.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argument_types_and_required_fields_match_the_public_catalog() {
+        for tool in catalog() {
+            let properties = tool.input_schema["properties"].as_object().unwrap();
+            let valid = properties
+                .iter()
+                .map(|(name, schema)| {
+                    let value = match schema["type"].as_str().unwrap() {
+                        "string" => json!("example"),
+                        "integer" => json!(800),
+                        "boolean" => json!(false),
+                        other => panic!("Unexpected public argument type: {other}"),
+                    };
+                    (name.clone(), value)
+                })
+                .collect::<serde_json::Map<_, _>>();
+            assert!(
+                checked_arguments(&tool.name, json!(valid)).is_ok(),
+                "{}",
+                tool.name
+            );
+            for field in tool.input_schema["required"].as_array().unwrap() {
+                let mut missing = valid.clone();
+                missing.remove(field.as_str().unwrap());
+                assert!(
+                    checked_arguments(&tool.name, json!(missing)).is_err(),
+                    "{}: missing {field}",
+                    tool.name
+                );
+            }
+            for (field, schema) in properties {
+                for value in [
+                    Value::Null,
+                    if schema["type"] == "string" {
+                        json!(false)
+                    } else {
+                        json!("false")
+                    },
+                ] {
+                    let mut invalid = valid.clone();
+                    invalid.insert(field.clone(), value);
+                    assert!(
+                        checked_arguments(&tool.name, json!(invalid)).is_err(),
+                        "{}: invalid {field}",
+                        tool.name
+                    );
+                }
+            }
+            let mut extra = valid;
+            extra.insert("unexpected".into(), json!(true));
+            assert!(
+                checked_arguments(&tool.name, json!(extra)).is_err(),
+                "{}: extra field",
+                tool.name
+            );
+        }
+        assert_eq!(
+            checked_arguments("handle_dialog", json!({"page_id":"p","accept":false})).unwrap()["accept"],
+            false
+        );
+        assert_eq!(
+            checked_arguments("open_page", json!({"url":"about:blank"})).unwrap()["headed"],
+            false
+        );
+    }
 }

@@ -44,6 +44,31 @@ async function closePage(id) {
   return 'OK';
 }
 
+/** Use Puppeteer's selection API for native options, preserving ordinary widget clicks. */
+async function selectOption(handle) {
+  const option = await handle.evaluate(element => {
+    if (!(element instanceof HTMLOptionElement)) return null;
+    const select = element.closest('select');
+    if (!select || !element.isConnected) throw new Error('Option is stale; inspect the page again');
+    if (select.disabled || element.matches(':disabled')) throw new Error('Option is disabled');
+    if ([...select.options].filter(other => other.value === element.value).length !== 1) {
+      throw new Error('Option value is ambiguous');
+    }
+    return { value: element.value };
+  });
+  if (!option) return false;
+  const parent = await handle.evaluateHandle(element => element.closest('select'));
+  try {
+    const select = parent.asElement();
+    if (!select) throw new Error('Option is stale; inspect the page again');
+    const selected = await select.select(option.value);
+    if (!selected.includes(option.value)) throw new Error('Option is stale; inspect the page again');
+    return true;
+  } finally {
+    await parent.dispose();
+  }
+}
+
 async function request(name, args) {
   if (name === 'init') {
     browser = await puppeteer.launch({
@@ -141,8 +166,9 @@ async function request(name, args) {
         if (!handle) throw new Error('Element is stale; inspect the page again');
         try {
           const locator = handle.asLocator().setTimeout(args.timeout);
-          if (name === 'click') await locator.click();
-          else await locator.fill(args.value);
+          if (name === 'click') {
+            if (node.role !== 'option' || !(await selectOption(handle))) await locator.click();
+          } else await locator.fill(args.value);
         } finally {
           await handle.dispose();
         }

@@ -312,7 +312,6 @@ impl Manager {
             state.pages.is_empty(),
             "The service has active pages; close them before updating"
         );
-        anyhow::ensure!(!state.updating, "Another update is already in progress");
         state.updating = true;
         Ok(())
     }
