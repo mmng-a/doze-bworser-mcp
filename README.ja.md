@@ -90,4 +90,4 @@ DOZE_BROWSER_CHROME='/専用のChrome実行ファイルの絶対パス' cargo te
 
 通常のテストではChromeを起動せず、並行した初回起動、SDKのスキーマ、所有者の呼び出し情報、OSのロック、設定の保持、待機中の取消、ダイアログの順序、後始末を確認します。任意の実ブラウザ検証では、ローカルの検証用ページと専用headless Chromeで入力・内容取得・画像・保存領域の分離・ダイアログ・並行操作・取消を確認します。
 
-CIはpushとプルリクエストでLinux・Windowsの整形、Clippy、Rust、Node、インストーラーの検証を実行します。macOSは「Run workflow」または `gh workflow run ci.yml` で手動実行した場合だけ検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。
+CIは「Run workflow」または `gh workflow run ci.yml -f os=ubuntu-latest` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。選んだOSで整形、Clippy、Rust、Node、インストーラーを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。

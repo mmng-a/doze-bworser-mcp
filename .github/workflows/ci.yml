@@ -1,17 +1,21 @@
 name: CI
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+    inputs:
+      os:
+        description: Runner OS
+        required: true
+        type: choice
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
 permissions:
   contents: read
 jobs:
   check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["macos-latest"]') || fromJSON('["ubuntu-latest", "windows-latest"]') }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ inputs.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
