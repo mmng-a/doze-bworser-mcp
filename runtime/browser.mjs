@@ -42,7 +42,6 @@ export class BrowserManager {
     this.pages = new Map();
     this.engines = new Map();
     this.locks = new Map();
-    this.threads = new Map();
     this.timeout = config.operation_timeout_seconds * 1000;
   }
   register(thread, parent) {
@@ -72,22 +71,6 @@ export class BrowserManager {
     }
     return thread;
   }
-  threadSignal(thread) {
-    if (!this.threads.has(thread)) this.threads.set(thread, new AbortController());
-    return this.threads.get(thread).signal;
-  }
-  startThread(thread, parent) {
-    this.register(thread, parent);
-    if (this.threads.get(thread)?.signal.aborted) this.threads.delete(thread);
-  }
-  async endThread(thread) {
-    this.register(thread);
-    const root = this.root(thread);
-    this.threadSignal(thread);
-    const targets = [...this.threads.keys()].filter(owner => owner === thread || (thread === root && this.root(owner) === root));
-    for (const owner of targets) this.threads.get(owner).abort(new Error('Thread has ended'));
-    await this.closeWhere(p => p.owner === thread || (thread === root && this.root(p.owner) === root));
-  }
   async serial(mode, action) {
     const previous = this.locks.get(mode) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(action);
@@ -99,6 +82,19 @@ export class BrowserManager {
     validateUrl(url);
     const id = randomUUID();
     const root = this.root(caller.thread);
+    if (!this.config.chrome_path) {
+      signal?.throwIfAborted();
+      this.chrome ??= import('./chrome.mjs').then(module => module.chromePath()).catch(error => { this.chrome = null; throw error; });
+      let abort;
+      try {
+        const canceled = new Promise((_, reject) => {
+          abort = () => reject(signal.reason);
+          signal?.addEventListener('abort', abort, { once: true });
+        });
+        this.config.chrome_path = await Promise.race([this.chrome, canceled]);
+      } finally { signal?.removeEventListener('abort', abort); }
+      signal?.throwIfAborted();
+    }
     const queuedAt = Date.now();
     const record = await this.serial(headed, async () => {
       signal?.throwIfAborted();
@@ -191,8 +187,6 @@ export class BrowserManager {
   }
   async call(caller, name, args, signal) {
     signal?.throwIfAborted();
-    signal = AbortSignal.any([...(signal ? [signal] : []), this.threadSignal(caller.thread), this.threadSignal(this.root(caller.thread))]);
-    signal.throwIfAborted();
     if (name === 'open_page') return this.open(caller, args.url, args.headed ?? false, signal);
     if (name === 'list_pages') {
       const records = [...this.pages.values()].filter(p => p.owner === caller.thread && !p.controller.closed);
@@ -201,7 +195,7 @@ export class BrowserManager {
         const { targetInfos } = await engine.session.send('Target.getTargets', {}, { timeout: this.timeout });
         for (const info of targetInfos) metadata.set(info.targetId, info);
       }));
-      signal.throwIfAborted();
+      signal?.throwIfAborted();
       return records.filter(p => metadata.has(p.targetId)).map(p => ({ page_id: p.id, url: metadata.get(p.targetId).url, title: metadata.get(p.targetId).title }));
     }
     const record = this.get(caller, args.page_id);

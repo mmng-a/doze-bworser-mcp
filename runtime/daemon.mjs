@@ -43,15 +43,6 @@ async function stop() {
     process.exit(0);
   } catch (error) { console.error(error); process.exit(1); }
 }
-async function hook(payload) {
-  const thread = payload.session_id;
-  switch (payload.hook_event_name) {
-    case 'SessionStart': manager.startThread(thread); break;
-    case 'SubagentStart': manager.startThread(payload.agent_id, thread); break;
-    case 'SessionEnd': await manager.endThread(thread); break;
-    default: throw new Error('Unsupported lifecycle hook');
-  }
-}
 function reply(socket, result) { socket.write(JSON.stringify({ ok: true, result }) + '\n'); }
 
 const server = net.createServer(socket => {
@@ -113,8 +104,7 @@ const server = net.createServer(socket => {
           socket.end();
           setImmediate(() => void stop());
           return;
-        } else if (request.command === 'hook') { await hook(request.payload); reply(socket); }
-        else throw new Error('Unknown IPC command');
+        } else throw new Error('Unknown IPC command');
         socket.end();
         idleExit();
       }

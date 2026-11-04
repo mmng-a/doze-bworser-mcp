@@ -13,36 +13,40 @@ Codexの複数スレッドで専用のChrome for Testingを共有するローカ
 | 共有のNode | 公式MCP SDK、Puppeteer、所有者、順序、取消の管理 | 最後の接続が閉じて短い後始末の待機が終わるまで |
 | 専用Chromium | ページの表示と操作 | 最初の `open_page` から最後のタブ終了まで |
 
-Codexは標準入出力のMCPとしてRustを起動します。RustとNodeの間は、macOS・LinuxではUnixドメインソケット、Windowsでは名前付きパイプを使います。RustはMCPを解釈せず、内部用のブラウザ操作RPCも持ちません。MCPを処理するのはNodeだけです。接続開始時にHMAC-SHA256で相互認証し、資格情報そのものは送信しません。Unixソケットは専用の非公開ディレクトリに置きます。小さな認証メッセージで、MCPのストリームか、開始・終了フックや状態確認の処理かを選びます。TCPの待受、HTTP MCPの中継、ログイン時の常駐サービスは使いません。
+Codexは標準入出力のMCPとしてRustを起動します。RustとNodeの間は、macOS・LinuxではUnixドメインソケット、Windowsでは名前付きパイプを使います。RustはMCPを解釈せず、内部用のブラウザ操作RPCも持ちません。MCPを処理するのはNodeだけです。接続開始時にHMAC-SHA256で相互認証し、資格情報そのものは送信しません。Unixソケットは専用の非公開ディレクトリに置きます。小さな認証メッセージで、MCPのストリームか、状態確認・停止の処理かを選びます。TCPの待受、HTTP MCPの中継、ログイン時の常駐サービスは使いません。
 
 通常のheadlessブラウザはOSユーザー全体で1個です。明示された共同操作には別の画面表示用ブラウザを1個使います。親スレッドごとに保存領域を分け、担当ごとにタブを所有します。ブラウザ操作とアクセシビリティ情報の取得にはpuppeteer-core 25.16.0の公開APIを使います。テキスト整形にはDevTools MCPのApache-2.0の実装を再利用します。DevTools MCPサーバー自体は起動しません。
 
-## 必要なものとインストール
-
-- macOS、Linux、Windows。ビルドにはRust 1.89以降、インストールにはPython 3.11以降が必要です。
-- Node.js 22.12.0以降とnpm。
-- 自動操作専用のChrome for Testing。利用者の通常のブラウザは自動選択しません。
-- 標準入出力のMCPと開始・終了フックに対応するCodexクライアント。
+## インストール
 
 ```sh
+brew install mmng-a/tap/doze-bworser-mcp
+codex mcp add doze-bworser-mcp -- doze-bworser-mcp
+```
+
+HomebrewはRustで本体をビルドし、Node.jsと実行時の依存関係を配置します。初回の `open_page` で対応する専用のChrome for TestingをPuppeteerの公式ダウンローダーから取得します。普段使うブラウザには接続しません。
+
+MCPクライアントがHomebrewの実行ファイルを見つけられない場合は、`command -v doze-bworser-mcp` で確認した絶対パスを登録してください。MCP設定を直接書く場合は次のとおりです。
+
+```toml
+[mcp_servers.doze-bworser-mcp]
+command = "doze-bworser-mcp"
+tool_timeout_sec = 90
+```
+
+専用インストーラーやフック登録は不要です。MCPサーバーはクライアントの設定ファイルを書き換えません。ローカル通信の認証情報は初回起動時に `~/.config/doze-bworser-mcp`、専用ブラウザは `~/.cache/doze-bworser-mcp` に準備します。設定ファイルを公開しないでください。初回のブラウザ取得には時間がかかることがあります。
+
+更新前に、このサーバーへのすべてのMCP接続を閉じ、`doze-bworser-mcp status` で共有サービスが終了したことを確認してください。その後 `brew upgrade mmng-a/tap/doze-bworser-mcp` を実行して再接続します。`doze-bworser-mcp status` で共有サービスの状態を確認できます。
+
+macOSとLinuxではHomebrewを利用できます。Windowsやソースからの導入にはRust 1.89以降、Node.js 22.12以降とnpmが必要です。
+
+```sh
+npm ci --ignore-scripts --prefix runtime
 cargo build --release --locked
-python3 scripts/install.py --chrome '/専用のChrome実行ファイルの絶対パス'
+codex mcp add doze-bworser-mcp -- /absolute/path/to/target/release/doze-bworser-mcp
 ```
 
-WindowsでPythonコマンドが `python` の場合は読み替えてください。2回目以降は設定済みのChromeの配置を再利用でき、`--chrome` を省略できます。
-
-インストーラーは `~/.local/bin` にランチャーを配置し、固定バージョンのNode実行環境を `~/.local/share/doze-bworser-mcp/runtimes` に準備して、Codexに標準入出力のコマンドと開始・終了フックを登録します。認証情報を含む個人設定は `~/.config/doze-bworser-mcp` に保存します。公開しないでください。無関係なCodex設定は保持し、変更前にバックアップします。既存スレッドではMCP設定を再読込し、変更したフックは必要に応じて `/hooks` で信頼してください。
-
-更新前には、このサービスを使うMCP接続を閉じてください。インストーラーは動作中のサービスを置き換えず、置き換え中は監視プロセスと同じOSのロックを保持します。既存の実行環境は上書きしません。旧HTTP・LaunchAgent版から移行する場合は、先にサービスを停止してOSへの登録を解除し、その後で設定の `port` を削除してください。このインストーラーはOSのサービスを管理しません。
-
-```sh
-doze-bworser-mcp status
-doze-bworser-mcp stop
-```
-
-`status` は接続数・タブ数・ブラウザ数を返します。`stop` はMCP接続やタブが残っている間は終了を拒否します。どちらもサービスが存在しない場合はエラーを返します。次のMCP接続時に自動で起動します。
-
-MCPのランチャーは通常、ホスト側クライアントのツール実行環境で動きます。その場合、コーディング用サンドボックスのシェルからChromiumを起動する必要はありません。MCPにしてもOSの制限やツールの承認はなくなりません。MCPプロセス自体も制限するホストでは、実行ファイル、ローカルIPC、ブラウザ起動への許可が必要です。
+MCPにしてもOSの制限やツールの承認はなくなりません。MCPプロセス自体を制限するホストでは、ローカルIPC、ブラウザのダウンロード・起動への許可が必要です。
 
 ## ツール
 
@@ -68,7 +72,7 @@ MCPのランチャーは通常、ホスト側クライアントのツール実�
 
 ## 動作と後始末
 
-- 所有者はCodexの呼び出し情報から取得し、モデルが入力する引数にはしません。フックと親子情報で親スレッドを特定します。Codex以外のクライアントは接続ごとに分離します。切断時にはその接続のタブを閉じ、親スレッド終了時には子のタブも閉じます。
+- 所有者はCodexの呼び出し情報から取得し、モデルが入力する引数にはしません。提供された呼び出し元の情報から親子関係を特定します。Codex以外のクライアントは接続ごとに分離します。切断時にはその接続のタブを閉じます。
 - 30分以上操作していないタブは、ダイアログの応答待ちも含めて終了します。実行中の操作には別の制限時間を適用します。古いページIDは再利用しません。終了後は新しいタブを開いてください。
 - 順番待ちと実行の制限時間は、それぞれ既定で20秒です。起動と一覧取得にも制限時間を適用します。ダイアログの応答待ちはPuppeteer内部の別の制限時間では打ち切りません。待機中に取り消された要求や時間切れの要求は実行しません。実行中の取消・時間切れでは、結果が不明なタブを閉じます。外部への変更が起きている可能性は残ります。自動再実行はしません。
 - ダイアログの通知を返しても、元の操作の順番は解放しません。元の操作を追跡し、応答待ちでは実行の制限時間を止め、通常操作との重複を防ぎます。`handle_dialog` は元の操作を再開して完了を待ちます。`open_page` 中に開いた場合は、保持した `page_id` をエラーに含めます。
@@ -84,10 +88,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 npm ci --ignore-scripts --prefix runtime
 npm test --prefix runtime
-python3 -m unittest discover -s scripts -p 'test_*.py'
 DOZE_BROWSER_CHROME='/専用のChrome実行ファイルの絶対パス' cargo test --locked --test service
 ```
 
-通常のテストではChromeを起動せず、並行した初回起動、SDKのスキーマ、所有者の呼び出し情報、OSのロック、設定の保持、待機中の取消、ダイアログの順序、後始末を確認します。任意の実ブラウザ検証では、ローカルの検証用ページと専用headless Chromeで入力・内容取得・画像・保存領域の分離・ダイアログ・並行操作・取消を確認します。
+通常のテストではChromeを起動せず、並行した初回起動、SDKのスキーマ、所有者の呼び出し情報、OSのロック、待機中の取消、ダイアログの順序、後始末を確認します。任意の実ブラウザ検証では、ローカルの検証用ページと専用headless Chromeで入力・内容取得・画像・保存領域の分離・ダイアログ・並行操作・取消を確認します。
 
-CIは「Run workflow」または `gh workflow run ci.yml -f os=ubuntu-latest` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。選んだOSで整形、Clippy、Rust、Node、インストーラーを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。
+CIは「Run workflow」または `gh workflow run ci.yml -f os=ubuntu-latest` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。選んだOSで整形、Clippy、Rust、Node、パッケージを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。

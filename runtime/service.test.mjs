@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,8 +14,9 @@ const binary = process.env.DOZE_TEST_BINARY;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 class Client {
-  constructor(path) {
-    this.child = spawn(binary, ['proxy', '--config', path], { stdio: ['pipe', 'pipe', 'pipe'] });
+  constructor(path, env = process.env, requestTimeout = 15_000) {
+    this.child = spawn(binary, path ? ['proxy', '--config', path] : ['proxy'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.requestTimeout = requestTimeout;
     this.pending = new Map();
     this.next = 1;
     this.errors = '';
@@ -30,7 +31,7 @@ class Client {
   request(method, params) {
     const id = this.next++;
     const promise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} ${params?.name ?? ""} timed out: ${this.errors}`)); }, 15_000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} ${params?.name ?? ""} timed out: ${this.errors}`)); }, this.requestTimeout);
       this.pending.set(id, response => { clearTimeout(timer); this.pending.delete(id); resolve(response); });
       this.send({ id, method, params });
     });
@@ -98,7 +99,7 @@ test('concurrent stdio launchers share one cold Node endpoint and SDK schemas', 
   await one.close();
   await delay(50);
   assert.equal(f.status().connections, 2);
-  // The lifetime lock prevents an installer from replacing an endpoint in use.
+  // A running endpoint rejects explicit shutdown.
   const stop = spawn(binary, ['stop', '--config', f.path]);
   assert.notEqual(await new Promise(resolve => stop.once('exit', resolve)), 0);
 });
@@ -252,5 +253,53 @@ test('only startup transport failures reconnect; accepted MCP bytes are never re
       await new Promise(resolve => server.close(resolve));
       rmSync(directory, { recursive: true, force: true });
     }
+  }
+});
+
+test('plain stdio registration prepares one private endpoint without client configuration changes', { skip: !binary, timeout: 20_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'doze-first-run-'));
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory };
+  const clients = [new Client(undefined, env), new Client(undefined, env), new Client(undefined, env)];
+  let config;
+  try {
+    await Promise.all(clients.map(client => client.initialize()));
+    config = JSON.parse(readFileSync(join(directory, '.config/doze-bworser-mcp/config.json'), 'utf8'));
+    assert.equal(text(await clients[0].tool('list_pages', {})), '[]');
+    const result = JSON.parse(execFileSync(binary, ['status'], { env, encoding: 'utf8' }));
+    assert.deepEqual(result, { connections: 3, pages: 0, browsers: 0 });
+    assert.equal(config.chrome_path, '');
+    assert.equal(spawnSync(process.execPath, ['-e', 'require("fs").accessSync(process.argv[1])', join(directory, '.codex')]).status, 1);
+  } finally {
+    await Promise.all(clients.map(client => client.close()));
+    await delay(3400);
+    rmSync(directory, { recursive: true, force: true });
+    if (config && process.platform !== 'win32') rmSync(config.socket_path.slice(0, config.socket_path.lastIndexOf('/')), { recursive: true, force: true });
+  }
+});
+
+test('first browser use downloads its own Chrome without a separate installer', { skip: !binary || !process.env.DOZE_TEST_MANAGED_CHROME, timeout: 180_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'doze-managed-'));
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory };
+  const client = new Client(undefined, env, 120_000);
+  let config;
+  try {
+    await client.initialize();
+    config = JSON.parse(readFileSync(join(directory, '.config/doze-bworser-mcp/config.json'), 'utf8'));
+    assert.equal(text(await client.tool('list_pages', {})), '[]');
+    const version = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).config.chrome_version;
+    const cache = join(directory, '.cache/doze-bworser-mcp', version);
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, 'interrupted-extraction'), 'partial');
+    const page_id = value(await client.tool('open_page', { url: 'about:blank' })).page_id;
+    assert.equal(existsSync(join(cache, 'interrupted-extraction')), false);
+    assert.equal(existsSync(join(cache, '.complete')), true);
+    assert.equal(value(await client.tool('evaluate_script', { page_id, expression: '2 + 2' })), 4);
+    await client.tool('close_page', { page_id });
+    assert.equal(spawnSync(process.execPath, ['-e', 'require("fs").accessSync(process.argv[1])', join(directory, '.codex')]).status, 1);
+  } finally {
+    await client.close();
+    await delay(3400);
+    rmSync(directory, { recursive: true, force: true });
+    if (config && process.platform !== 'win32') rmSync(config.socket_path.slice(0, config.socket_path.lastIndexOf('/')), { recursive: true, force: true });
   }
 });

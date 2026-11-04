@@ -51,7 +51,76 @@ pub fn read_config(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-/// Only the supervisor or installer may hold this lock; it covers Node's lifetime.
+/// Prepare private transport credentials; runtime paths belong to the installed package.
+pub fn local_config() -> Result<(PathBuf, Config)> {
+    let path = default_config_path();
+    let directory = path.parent().context("Missing config directory")?;
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join("bootstrap.lock"))?;
+    lock.lock()?;
+    let token = if path.exists() {
+        read_config(&path)?.token
+    } else {
+        let mut bytes = [0; 32];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| anyhow::anyhow!("Cannot generate service token: {error}"))?;
+        hex::encode(bytes)
+    };
+    #[cfg(unix)]
+    let socket_path = {
+        let socket_dir = PathBuf::from("/tmp").join(format!("doze-bworser-{}", &token[..24]));
+        std::fs::create_dir_all(&socket_dir)?;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = std::fs::symlink_metadata(&socket_dir)?;
+        if !metadata.is_dir() || metadata.uid() != std::fs::metadata(directory)?.uid() {
+            bail!("IPC directory must belong to this user");
+        }
+        std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))?;
+        socket_dir.join("ipc.sock")
+    };
+    #[cfg(windows)]
+    let socket_path = PathBuf::from(format!(r"\\.\pipe\doze-bworser-{}", &token[..24]));
+    let runtime =
+        option_env!("DOZE_RUNTIME_DIR").unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/runtime"));
+    let config = Config {
+        token,
+        socket_path,
+        node_path: option_env!("DOZE_NODE_PATH").unwrap_or("node").into(),
+        daemon_path: PathBuf::from(runtime).join("daemon.mjs"),
+        chrome_path: PathBuf::new(),
+        operation_timeout_seconds: default_timeout(),
+    };
+    if !config.daemon_path.is_file() {
+        bail!("Node runtime is missing: {}", config.daemon_path.display());
+    }
+    let data = serde_json::to_vec_pretty(&config)?;
+    if std::fs::read(&path).ok().as_deref() != Some(&data) {
+        let temporary = directory.join("config.json.new");
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        options.open(&temporary)?.write_all(&data)?;
+        std::fs::rename(temporary, &path)?;
+    }
+    Ok((path, config))
+}
+
+/// Hold the native lock for the shared service lifetime.
 pub fn service_lock(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)
@@ -59,8 +128,7 @@ pub fn service_lock(path: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .open(path.with_file_name("service.lock"))?;
-    file.try_lock()
-        .context("The shared service is running or being installed")?;
+    file.try_lock().context("The shared service is running")?;
     Ok(file)
 }
 
@@ -251,7 +319,7 @@ async fn authenticate(
                 .unwrap_or("Service rejected connection")
         );
     }
-    if command != "mcp" && command != "hook" {
+    if command != "mcp" {
         println!("{}", reply["result"]);
     }
     Ok(Handshake::Ready(stream))

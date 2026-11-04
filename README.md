@@ -13,36 +13,40 @@ A local MCP endpoint that shares a dedicated Chrome for Testing across Codex thr
 | Shared Node endpoint | Official MCP SDK, Puppeteer, ownership, queues, cancellation | Until the last connection closes, then a short cleanup delay |
 | Dedicated Chromium | Render and operate pages | First `open_page` through last page closure |
 
-Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or lifecycle/status controls. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
+Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status controls. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
 
 Normal headless pages share one browser globally per OS user. Explicit joint viewing uses one separate headed browser. Storage is isolated by root thread; each caller owns its own pages. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
 
-## Requirements and installation
-
-- macOS, Linux, or Windows; Rust 1.89+ to build and Python 3.11+ to install.
-- Node.js 22.12.0+ and npm.
-- A dedicated Chrome for Testing executable. The user's ordinary browser is never selected automatically.
-- A Codex client supporting stdio MCP and lifecycle hooks.
+## Installation
 
 ```sh
+brew install mmng-a/tap/doze-bworser-mcp
+codex mcp add doze-bworser-mcp -- doze-bworser-mcp
+```
+
+Homebrew builds the Rust launcher and installs Node.js and the runtime dependencies. The first `open_page` downloads the supported dedicated Chrome for Testing through Puppeteer's official browser manager. Your everyday browser is not used.
+
+If the MCP client cannot find Homebrew's executable, register the absolute path reported by `command -v doze-bworser-mcp`. To configure MCP directly:
+
+```toml
+[mcp_servers.doze-bworser-mcp]
+command = "doze-bworser-mcp"
+tool_timeout_sec = 90
+```
+
+No installer or lifecycle hooks are required. The MCP server does not rewrite client configuration. On first startup, private transport credentials are prepared under `~/.config/doze-bworser-mcp`; dedicated browsers are stored under `~/.cache/doze-bworser-mcp`. Do not publish credential files. The first browser download can take some time.
+
+Before upgrading, close every MCP connection to this server and confirm the shared service has exited with `doze-bworser-mcp status`. Then run `brew upgrade mmng-a/tap/doze-bworser-mcp` and reconnect. Use `doze-bworser-mcp status` to inspect the shared service.
+
+Homebrew is available on macOS and Linux. Windows and source builds require Rust 1.89+, Node.js 22.12+ and npm:
+
+```sh
+npm ci --ignore-scripts --prefix runtime
 cargo build --release --locked
-python3 scripts/install.py --chrome '/absolute/path/to/dedicated/chrome'
+codex mcp add doze-bworser-mcp -- /absolute/path/to/target/release/doze-bworser-mcp
 ```
 
-Use `python` on Windows if that is your Python command. Subsequent installs reuse the configured Chrome path and may omit `--chrome`.
-
-The installer copies the launcher to `~/.local/bin`, prepares a pinned, immutable Node runtime under `~/.local/share/doze-bworser-mcp/runtimes`, and registers the stdio command and lifecycle hooks in Codex. Settings and authentication credentials are private under `~/.config/doze-bworser-mcp`; do not publish them. Unrelated Codex settings are preserved, with backups before changes. Reload existing threads' MCP configuration; changed hooks may require trust through `/hooks`.
-
-Before updating, close MCP connections using the service. The installer refuses to replace a running service and holds the same native lock as its supervisor during replacement. It does not overwrite existing runtime directories. The old HTTP/LaunchAgent version must be stopped and its service registration removed before migration; remove its `port` setting after stopping it. This installer does not manage OS services.
-
-```sh
-doze-bworser-mcp status
-doze-bworser-mcp stop
-```
-
-`status` reports connection, page, and browser counts. `stop` refuses while MCP connections or pages remain. Both report an error when the service is absent. The next MCP connection starts the service automatically.
-
-The MCP launcher normally runs in the host client's tool environment, so browser operations do not require shell access to Chromium from a coding sandbox. MCP does not remove OS restrictions or tool approval requirements. A host that sandboxes the MCP process itself must permit its executable, local IPC, and browser startup.
+MCP does not remove OS restrictions or tool approval requirements. Hosts that sandbox MCP processes must permit local IPC and browser downloading and startup.
 
 ## Tools
 
@@ -68,7 +72,7 @@ Use `inspect_page` before element operations. Only references from the latest co
 
 ## Operation and cleanup
 
-- Caller identity comes from Codex metadata, not model-supplied arguments. Hooks and parent metadata identify root threads. Non-Codex clients are isolated per connection. Disconnecting closes that connection's pages; ending a root thread closes its descendants' pages.
+- Caller identity comes from Codex metadata, not model-supplied arguments. Available caller metadata identifies parent relationships. Non-Codex clients are isolated per connection. Disconnecting closes that connection's pages.
 - Pages idle for 30 minutes close automatically, including pages waiting for a dialog. Active operations are bounded separately. Old page IDs are never reassigned; open a new page after closure.
 - Queue waiting and active execution each default to 20 seconds. Browser startup and target listing are bounded too. Dialog input does not inherit an independent CDP deadline. Queued canceled or expired calls do not execute. Active cancellation or timeout closes the uncertain page; external effects may already have happened. Calls are never retried automatically.
 - A dialog response does not release the page's operation slot. The original operation stays tracked, its execution deadline pauses during dialog input, and ordinary operations cannot overlap it. `handle_dialog` resumes and waits for it. A dialog during `open_page` reports the retained `page_id` in the error.
@@ -84,10 +88,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 npm ci --ignore-scripts --prefix runtime
 npm test --prefix runtime
-python3 -m unittest discover -s scripts -p 'test_*.py'
 DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' cargo test --locked --test service
 ```
 
-Default tests check concurrent cold startup, SDK schemas, ownership metadata, native locks, installer preservation, queue cancellation, dialog ordering, and cleanup without starting Chrome. The optional real-browser test uses a local fixture and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation.
+Default tests check concurrent cold startup, SDK schemas, ownership metadata, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. The optional real-browser test uses a local fixture and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation.
 
-CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=ubuntu-latest`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The selected runner performs formatting, Clippy, Rust, Node and installer checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
+CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=ubuntu-latest`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The selected runner performs formatting, Clippy, Rust, Node and package checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.

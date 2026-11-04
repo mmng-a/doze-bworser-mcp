@@ -30,7 +30,7 @@ test('dialog wait retains its CDP request until response and does not inherit a 
     connection = new Connection('', transport, 0, args.protocolTimeout ?? 15);
     return browser;
   });
-  const manager = new BrowserManager({ operation_timeout_seconds: 1 });
+  const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 1 });
   t.after(async () => { await manager.closeWhere(() => true); connection?.dispose(); });
   const caller = { thread: 'root', connection: 'connection' };
   const originalSignal = new AbortController();
@@ -61,7 +61,7 @@ test('browser startup has an owned deadline and accepts cancellation', async t =
       entered.resolve();
       return new Promise((_, reject) => options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
     });
-    const manager = new BrowserManager({ operation_timeout_seconds: 0.02 });
+    const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 0.02 });
     const abort = new AbortController();
     const opened = manager.call({ thread: 'root' }, 'open_page', { url: 'about:blank' }, abort.signal);
     const rejected = assert.rejects(opened);
@@ -75,7 +75,7 @@ test('browser startup has an owned deadline and accepts cancellation', async t =
 test('page listing has a per-command deadline after the shared protocol deadline is disabled', async () => {
   const transport = { send() {}, close() {} };
   const connection = new Connection('', transport, 0, 0);
-  const manager = new BrowserManager({ operation_timeout_seconds: 0.02 });
+  const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 0.02 });
   let attached = 0;
   const engine = { session: { send: (...args) => connection.send(...args) }, browser: { target() { return { async createCDPSession() { attached++; return { send: (...args) => connection.send(...args), async detach() {} }; } }; } } };
   manager.pages.set('page', { id: 'page', owner: 'root', targetId: 'target', engine, controller: {} });
@@ -84,4 +84,22 @@ test('page listing has a per-command deadline after the shared protocol deadline
     assert.equal(attached, 0);
     assert.deepEqual(connection.getPendingProtocolErrors(), []);
   } finally { connection.dispose(); }
+});
+
+test('canceling the first browser download does not wait for it or launch a browser later', async t => {
+  const manager = new BrowserManager({ operation_timeout_seconds: 1 });
+  const download = Promise.withResolvers();
+  manager.chrome = download.promise;
+  let launches = 0;
+  t.mock.method(puppeteer, 'launch', () => { launches++; throw new Error('must not launch'); });
+  const abort = new AbortController();
+  const opened = manager.call({ thread: 'root' }, 'open_page', { url: 'about:blank' }, abort.signal);
+  const rejected = assert.rejects(opened, { name: 'AbortError' });
+  await tick();
+  abort.abort();
+  await rejected;
+  download.resolve('downloaded-chrome');
+  await tick();
+  assert.equal(launches, 0);
+  assert.equal(manager.pages.size, 0);
 });
