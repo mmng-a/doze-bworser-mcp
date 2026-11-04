@@ -44,7 +44,7 @@ export function createMcp(manager, connection) {
         const value = await manager.call(caller, name, args, AbortSignal.any([ctx.mcpReq.signal, connection.signal]));
         if (name === 'take_screenshot') return { content: [{ type: 'image', data: value.image, mimeType: 'image/png' }] };
         return { content: [{ type: 'text', text: name !== 'evaluate_script' && typeof value === 'string' ? value : JSON.stringify(value) }] };
-      } catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
+      } catch (error) { return { isError: true, content: [{ type: 'text', text: String(error instanceof Error ? error.message : error) }] }; }
     });
   }
   return server;

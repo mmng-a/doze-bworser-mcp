@@ -129,6 +129,18 @@ test('real Chromium: ownership, native input, dialogs, ordering, cancellation an
   await one.tool('fill', { page_id: page, element: input, value: 'Example value' }, 'one');
   await one.tool('click', { page_id: page, element: option }, 'one');
   assert.deepEqual(value(await one.tool('evaluate_script', { page_id: page, expression: '[document.querySelector("input").value,document.querySelector("select").value]' }, 'one')), ['Example value', 'b']);
+  for (const [expression, expected] of [['0', '0'], ['false', 'false'], ['null', 'null'], ['undefined', 'undefined'], ["''", ''], ["'message'", 'message'], ["new Error('native')", 'native']]) {
+    for (const source of [`(() => { throw ${expression}; })()`, `Promise.reject(${expression})`]) {
+      const failure = await one.call('evaluate_script', { page_id: page, expression: source }, 'one').promise;
+      assert.equal(failure.error, undefined, JSON.stringify(failure));
+      assert.equal(failure.result.isError, true);
+      assert.equal(text(failure.result), expected);
+    }
+  }
+  for (const expression of ['0', 'false', 'null', 'undefined', "''"]) {
+    const expected = expression === 'undefined' ? null : expression === "''" ? '' : JSON.parse(expression);
+    assert.equal(value(await one.tool('evaluate_script', { page_id: page, expression }, 'one')), expected);
+  }
   const dialog = await one.call('evaluate_script', { page_id: page, expression: "new Promise(resolve => { alert('outcome may be unknown'); setTimeout(() => { window.settled = true; resolve('done'); }, 200); })" }, 'one').promise;
   assert.equal(dialog.result.isError, true);
   assert.match(text(dialog.result), /handle_dialog/);

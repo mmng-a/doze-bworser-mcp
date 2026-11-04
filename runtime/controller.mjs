@@ -75,8 +75,7 @@ export class PageController extends EventEmitter {
       this.syncDialog();
       if (this.dialog) throw new PendingDialog(this.dialog);
       if (active.settled) {
-        if (active.error) throw active.error;
-        return active.value;
+        return active.promise;
       }
       await this.changed(signal);
     }
@@ -107,13 +106,13 @@ export class PageController extends EventEmitter {
       signal?.addEventListener('abort', active.abort, { once: true });
       this.resume(active);
       // The action is invoked only after the queue and cancellation checks above.
-      Promise.resolve().then(() => { this.check(signal); return action(); }).then(
-        value => { active.value = value; }, error => { active.error = error; },
-      ).finally(() => {
+      active.promise = Promise.resolve().then(() => { this.check(signal); return action(); });
+      const settle = () => {
         active.settled = true;
         this.finish(active);
         this.emit('change');
-      });
+      };
+      active.promise.then(settle, settle);
       return await this.outcome(active, signal);
     } finally {
       if (!active) slot.resolve();

@@ -105,3 +105,38 @@ test('manual dialog response resumes the active deadline without another tool ca
   await new Promise(resolve => setTimeout(resolve, 320));
   assert.equal(disposed, 1);
 });
+
+test('operation results distinguish every rejection value from a successful return', async () => {
+  const controller = new PageController(new EventEmitter(), async () => {});
+  for (const reason of [0, false, null, undefined, '', 'message', new Error('native')]) {
+    assert.equal(await controller.run(() => reason), reason);
+    for (const action of [() => { throw reason; }, () => Promise.reject(reason)]) {
+      let rejected = false;
+      try { await controller.run(action); }
+      catch (actual) { rejected = true; assert.equal(actual, reason); }
+      assert.equal(rejected, true, `lost rejection: ${String(reason)}`);
+    }
+  }
+});
+
+test('a rejection after dialog input propagates before the next operation', async () => {
+  const page = new EventEmitter();
+  const controller = new PageController(page, async () => {});
+  const action = Promise.withResolvers();
+  const interrupted = assert.rejects(controller.run(() => action.promise), PendingDialog);
+  await tick();
+  page.emit('dialog', fakeDialog('wait'));
+  await interrupted;
+  let rejected = false;
+  const handling = controller.handle(true).catch(reason => { rejected = true; assert.equal(reason, false); });
+  await tick();
+  let nextRan = false;
+  const next = controller.run(() => { nextRan = true; });
+  await tick();
+  assert.equal(nextRan, false);
+  action.reject(false);
+  await handling;
+  await next;
+  assert.equal(rejected, true);
+  assert.equal(nextRan, true);
+});
