@@ -118,52 +118,94 @@ pub async fn connection(
     payload: Value,
     start: bool,
 ) -> Result<BufReader<Stream>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut supervisor: Option<std::process::Child> = None;
-    let stream = loop {
-        match connect(config).await {
-            Ok(stream) => break stream,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                if !start {
-                    return Err(error.into());
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match connect(config).await {
+                Ok(stream) => match authenticate(stream, config, command, &payload).await {
+                    Ok(Handshake::Ready(stream)) => return Ok(stream),
+                    Ok(Handshake::Stopping) if command == "mcp" => {}
+                    Ok(Handshake::Stopping) => {
+                        bail!("Service is stopping; reconnect after it exits")
+                    }
+                    Err(error) if command == "mcp" && disconnected(&error) => {}
+                    Err(error) => return Err(error),
+                },
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    if !start {
+                        return Err(error.into());
+                    }
+                    let exited = match supervisor.as_mut() {
+                        Some(child) => child.try_wait()?.is_some(),
+                        None => true,
+                    };
+                    if exited {
+                        let log = OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path.with_file_name("service.log"))?;
+                        let mut child = Command::new(std::env::current_exe()?);
+                        child
+                            .args(["supervise", "--config"])
+                            .arg(path)
+                            .stdin(Stdio::null())
+                            .stdout(log.try_clone()?)
+                            .stderr(log);
+                        detached(&mut child);
+                        supervisor = Some(child.spawn().context("Cannot start shared supervisor")?);
+                    }
                 }
-                let exited = match supervisor.as_mut() {
-                    Some(child) => child.try_wait()?.is_some(),
-                    None => true,
-                };
-                if exited {
-                    let log = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path.with_file_name("service.log"))?;
-                    let mut child = Command::new(std::env::current_exe()?);
-                    child
-                        .args(["supervise", "--config"])
-                        .arg(path)
-                        .stdin(Stdio::null())
-                        .stdout(log.try_clone()?)
-                        .stderr(log);
-                    detached(&mut child);
-                    supervisor = Some(child.spawn().context("Cannot start shared supervisor")?);
-                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("Shared service did not start; see service.log");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(anyhow::anyhow!(
+            "Shared service connection timed out; see service.log"
+        ))
+    });
     if let Some(mut child) = supervisor {
         std::thread::spawn(move || {
             let _ = child.wait();
         });
     }
+    result
+}
+
+enum Handshake {
+    Ready(BufReader<Stream>),
+    Stopping,
+}
+
+fn disconnected(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|error| error.downcast_ref::<std::io::Error>())
+        .any(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::NotConnected
+            )
+        })
+}
+
+async fn authenticate(
+    stream: Stream,
+    config: &Config,
+    command: &str,
+    payload: &Value,
+) -> Result<Handshake> {
     let mut stream = BufReader::new(stream);
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce)
@@ -199,6 +241,9 @@ pub async fn connection(
         .await?;
     let reply = greeting(&mut stream).await?;
     if reply["ok"] != true {
+        if reply["code"] == "stopping" {
+            return Ok(Handshake::Stopping);
+        }
         bail!(
             "{}",
             reply["error"]
@@ -209,16 +254,22 @@ pub async fn connection(
     if command != "mcp" && command != "hook" {
         println!("{}", reply["result"]);
     }
-    Ok(stream)
+    Ok(Handshake::Ready(stream))
 }
 
 async fn greeting(stream: &mut BufReader<Stream>) -> Result<Value> {
     let mut reply = String::new();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        (&mut *stream).take(65536).read_line(&mut reply),
-    )
-    .await??;
+    let size = (&mut *stream).take(65536).read_line(&mut reply).await?;
+    if !reply.ends_with('\n') {
+        if size == 65536 {
+            bail!("Service greeting exceeds the size limit");
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Service disconnected during authentication",
+        )
+        .into());
+    }
     serde_json::from_str(&reply).context("Invalid service greeting")
 }
 

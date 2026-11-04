@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createIpcServer } from 'node:net';
 
@@ -167,7 +167,9 @@ test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip:
   const token = 'b'.repeat(64);
   writeFileSync(path, JSON.stringify({ token, socket_path: socket, node_path: process.execPath, daemon_path: 'unused', chrome_path: 'unused' }));
   let received = '';
+  let attempts = 0;
   const server = createIpcServer(stream => {
+    attempts++;
     stream.on('data', chunk => {
       received += chunk;
       stream.end(JSON.stringify({ proof: '0'.repeat(64) }) + '\n');
@@ -181,6 +183,62 @@ test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip:
   child.stderr.on('data', chunk => { errors += chunk; });
   assert.notEqual(await new Promise(resolve => child.once('exit', resolve)), 0);
   assert.match(errors, /authentication failed/);
+  assert.equal(attempts, 1, 'authentication failures must not be retried');
   assert.equal(received.includes(token), false);
   assert.deepEqual(Object.keys(JSON.parse(received)), ['nonce']);
+});
+
+test('only startup transport failures reconnect; accepted MCP bytes are never replayed', { skip: !binary, timeout: 15_000 }, async () => {
+  for (const mode of ['challenge-eof', 'ack-eof', 'stopping', 'after-ack']) {
+    const directory = mkdtempSync(join(tmpdir(), 'doze-reconnect-'));
+    const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-reconnect-${randomUUID()}` : `/tmp/doze-reconnect-${randomUUID()}.sock`;
+    const path = join(directory, 'config.json');
+    const token = 'c'.repeat(64);
+    writeFileSync(path, JSON.stringify({ token, socket_path: socket, node_path: process.execPath, daemon_path: 'unused', chrome_path: 'unused' }));
+    let attempts = 0;
+    let forwarded = 0;
+    const server = createIpcServer(stream => {
+      const attempt = ++attempts;
+      let nonce;
+      let authenticated = false;
+      createInterface({ input: stream }).on('line', line => {
+        const message = JSON.parse(line);
+        const mac = role => createHmac('sha256', token).update(`${role}:${nonce}`).digest('hex');
+        if (nonce === undefined) {
+          nonce = message.nonce;
+          if (attempt === 1 && mode === 'challenge-eof') stream.end();
+          else stream.write(JSON.stringify({ proof: mac('server') }) + '\n');
+        } else if (!authenticated) {
+          assert.equal(message.proof, mac('client'));
+          assert.equal(message.command, 'mcp');
+          if (attempt === 1 && mode === 'ack-eof') stream.end();
+          else if (attempt === 1 && mode === 'stopping') stream.end(JSON.stringify({ ok: false, code: 'stopping', error: 'Service is stopping' }) + '\n');
+          else { authenticated = true; stream.write('{"ok":true}\n'); }
+        } else {
+          forwarded++;
+          assert.equal(message.method, 'initialize');
+          stream.end(mode === 'after-ack' ? undefined : JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }) + '\n');
+        }
+      });
+    });
+    await new Promise(resolve => server.listen(socket, resolve));
+    const child = spawn(binary, ['proxy', '--config', path], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const deadline = setTimeout(() => child.kill(), 5000);
+    let output = '';
+    let errors = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { errors += chunk; });
+    child.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n');
+    try {
+      assert.equal(await new Promise(resolve => child.once('exit', resolve)), 0, `${mode}: ${errors}`);
+      assert.equal(attempts, mode === 'after-ack' ? 1 : 2, mode);
+      assert.equal(forwarded, 1, mode);
+      assert.equal(mode === 'after-ack' ? output : JSON.parse(output).id, mode === 'after-ack' ? '' : 1);
+    } finally {
+      clearTimeout(deadline);
+      child.kill();
+      await new Promise(resolve => server.close(resolve));
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
 });

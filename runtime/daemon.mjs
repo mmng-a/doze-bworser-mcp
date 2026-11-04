@@ -85,7 +85,7 @@ const server = net.createServer(socket => {
       const proof = Buffer.from(request.proof ?? '', 'hex');
       const expected = mac('client');
       if (proof.length !== expected.length || !timingSafeEqual(proof, expected)) throw new Error('Unauthorized IPC connection');
-      if (closing) throw new Error('Service is stopping; reconnect after it exits');
+      if (closing) throw Object.assign(new Error('Service is stopping; reconnect after it exits'), { code: 'stopping' });
       if (request.command === 'mcp') {
         clearTimeout(idle);
         socket.setTimeout(0);
@@ -119,7 +119,7 @@ const server = net.createServer(socket => {
         idleExit();
       }
     })().catch(error => {
-      socket.end(JSON.stringify({ ok: false, error: error.message }) + '\n');
+      socket.end(JSON.stringify({ ok: false, error: error.message, code: error.code }) + '\n');
       idleExit();
     });
   };

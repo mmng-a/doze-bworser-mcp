@@ -106,12 +106,28 @@ export class BrowserManager {
       let engine = this.engines.get(headed);
       if (!engine) {
         const { default: puppeteer } = await import('puppeteer-core');
-        const browser = await puppeteer.launch({ executablePath: this.config.chrome_path, headless: !headed,
-          pipe: true, timeout: 15_000, defaultViewport: { width: 1440, height: 900 },
-          waitForInitialPage: false, args: ['--no-startup-window'] });
-        engine = { browser, groups: new Map() };
+        const startup = new AbortController();
+        const abort = () => startup.abort(signal.reason);
+        signal?.addEventListener('abort', abort, { once: true });
+        const deadline = setTimeout(() => startup.abort(new Error('Browser startup timed out')), this.timeout);
+        try {
+          startup.signal.throwIfAborted();
+          signal?.throwIfAborted();
+          const browser = await puppeteer.launch({ executablePath: this.config.chrome_path, headless: !headed,
+            pipe: true, timeout: 0, protocolTimeout: 0, signal: startup.signal,
+            defaultViewport: { width: 1440, height: 900 }, waitForInitialPage: false, args: ['--no-startup-window'] });
+          const session = await browser.target().createCDPSession();
+          startup.signal.throwIfAborted();
+          engine = { browser, session, groups: new Map() };
+        } catch (error) {
+          startup.abort(error);
+          throw startup.signal.reason;
+        } finally {
+          clearTimeout(deadline);
+          signal?.removeEventListener('abort', abort);
+        }
         this.engines.set(headed, engine);
-        browser.on('disconnected', () => {
+        engine.browser.on('disconnected', () => {
           if (this.engines.get(headed) === engine) this.engines.delete(headed);
           for (const p of this.pages.values()) if (p.engine === engine) {
             void p.controller.close(new PageClosed('Browser disconnected; page is closed. Open a new page'));
@@ -182,10 +198,10 @@ export class BrowserManager {
       const records = [...this.pages.values()].filter(p => p.owner === caller.thread && !p.controller.closed);
       const metadata = new Map();
       await Promise.all([...new Set(records.map(p => p.engine))].map(async engine => {
-        const session = await engine.browser.target().createCDPSession();
-        try { for (const info of (await session.send('Target.getTargets')).targetInfos) metadata.set(info.targetId, info); }
-        finally { await session.detach(); }
+        const { targetInfos } = await engine.session.send('Target.getTargets', {}, { timeout: this.timeout });
+        for (const info of targetInfos) metadata.set(info.targetId, info);
       }));
+      signal.throwIfAborted();
       return records.filter(p => metadata.has(p.targetId)).map(p => ({ page_id: p.id, url: metadata.get(p.targetId).url, title: metadata.get(p.targetId).title }));
     }
     const record = this.get(caller, args.page_id);

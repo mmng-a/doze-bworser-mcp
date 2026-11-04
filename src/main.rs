@@ -24,7 +24,15 @@ async fn main() -> Result<()> {
     };
     let config = read_config(&path)?;
     match command {
-        "proxy" => proxy(&path, &config).await,
+        "proxy" => {
+            let result = proxy(&path, &config).await;
+            // Tokio's stdin reader cannot be canceled when its peer disconnects.
+            if let Err(error) = result {
+                eprintln!("Error: {error:#}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         "supervise" => supervise(&path, &config),
         "hook" => {
             let mut text = String::new();
