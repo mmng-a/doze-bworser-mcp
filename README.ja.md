@@ -2,15 +2,16 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
-Codexの複数スレッドで、必要な時に起動する1個のChrome for Testingを共有するローカルMCPサービスです。初期化やツール一覧の取得ではブラウザを起動しません。別のタブは並行して処理し、同じタブへの操作は順番に実行します。各呼び出しは処理の完了後に結果を返します。
+Codexの複数スレッドで、必要な時に起動する1個のChrome for Testingを共有するローカルMCPサービスです。初期化やツール一覧の取得ではブラウザを起動しません。DevTools MCPがページ単位として扱う操作は別タブで並行し、同じタブへの操作は順番に実行します。JavaScript実行など、ブラウザ全体の操作はDevToolsの順序制御に従います。各呼び出しは処理の完了後に結果を返します。
 
 ## 必要なもの
 
 - macOS。ビルドにはRust 1.88以降、インストールにはPython 3.11以降が必要です。
+- Node.js（Chrome DevTools MCPの対応バージョン）とnpm。
 - 自動操作専用のGoogle Chrome for Testing。利用者の通常のブラウザは自動選択しません。
 - Streamable HTTP接続のMCPを利用できるCodexクライアント。
 
-インストール後はRustの実行ファイル1個で動作します。Node.jsやmcp-dozeは不要です。通常のheadless用ブラウザを全体で1個共有します。明示的な共同操作には、別の画面表示用ブラウザを使います。
+待機中はRustの受付だけが動作します。最初のブラウザ操作で、全スレッドが共有するNode.jsのChrome DevTools MCPとChromiumを起動し、最後のタブを閉じると両方を停止します。ブラウザ操作・内容取得・要素ID・ダイアログの処理は、Chrome DevTools MCP 1.12.0へ委譲します。通常のheadless用ブラウザを全体で1個共有します。明示的な共同操作には、別の画面表示用ブラウザを使います。
 
 サンドボックス内からはHTTP MCPで接続します。ChromiumはLaunchAgent側で起動します。ループバック通信が禁止された環境では利用できません。
 
@@ -22,6 +23,8 @@ python3 scripts/install.py
 ```
 
 既定では、既存の専用ブラウザ `~/.local/share/codex-browser/chrome/current/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` を使います。別の専用配置を使う場合は、`~/.config/doze-bworser-mcp/config.json` の `chrome_path` を設定してください。
+
+インストーラーは固定バージョンのDevTools MCPを `~/.local/share/doze-bworser-mcp/runtime` へ配置します。利用統計・自動更新確認・CrUX送信を無効にして起動します。
 
 インストーラーは、LaunchAgent `com.masasam.doze-bworser-mcp`、`~/.codex/config.toml` の認証付きローカルHTTP MCP、開始・終了フックを登録します。サービスはログイン時に起動して待機し、ブラウザ操作を初めて受けた時にChromiumを起動します。既定のポート番号は45917です。アクセストークンを含む個人設定ファイルは公開しないでください。
 
@@ -43,7 +46,7 @@ python3 scripts/install.py
 
 操作結果はMCPの `content` だけで返します。`open_page` は `page_id`、`list_pages` はID・URL・タイトルの配列、`inspect_page` はテキスト、`take_screenshot` は画像、`evaluate_script` は評価結果のJSON、それ以外は `OK` を返します。ページの初期表示サイズは1440×900です。変更する場合は `set_viewport` を使います。
 
-内容取得はメインフレームのChromiumアクセシビリティツリーを使い、DevToolsと同じ `uid`・役割・名前・属性・階層の表記で返します。
+内容取得のテキストと要素IDはDevTools MCPの返答をそのまま使います。
 
 ## 注意点
 
@@ -51,10 +54,13 @@ python3 scripts/install.py
 - 呼び出し元が一覧取得・操作できるのは自分のタブだけです。Codex以外のMCPクライアントは接続単位で分離します。MCP接続を終了すると、その接続のタブを閉じます。別の接続が使っているタブは保持します。親スレッドの終了時には、その親と子の管理対象を閉じます。
 - 30分以上操作していないタブを定期的に閉じます。操作中のタブは対象にしません。終了後の操作には、新しいタブを開くようエラーを返します。
 - 最後のタブを閉じると、対応する専用ブラウザを停止します。待機するMCPサービスは残ります。
-- ページ移動はDOMの準備完了まで待ち、終わらない通信の終了は待ちません。入力操作の成功は、外部処理の成功まで保証しません。必要な結果を操作後の画面で確認してください。
-- 要素の参照IDは `inspect_page` の再実行で更新し、ページ移動で失効します。アクセシビリティツリーには、ブラウザが公開する入力値や状態も含まれます。
+- ページ移動と操作後の待機はDevTools MCPが行います。入力操作の成功は、外部処理の成功まで保証しません。必要な結果を操作後の画面で確認してください。
+- 要素の参照IDには、最新の `inspect_page` が返した `uid` を使います。要素の寿命はDevTools MCPが管理します。アクセシビリティツリーには、ブラウザが公開する入力値や状態も含まれます。
+- `evaluate_script` の実行中にスクリプトが開いたダイアログは、DevToolsの `dismiss` 指定で閉じます。
+- 新規タブの読み込み中にダイアログが開いた場合もタブを保持し、エラーに `page_id` を含めます。
 - JavaScriptのダイアログが開いている場合は、その内容をエラーで返します。元の操作を繰り返さず、`handle_dialog` で応答してから結果を確認してください。
 - 順番待ちと実行の制限時間は、それぞれ既定で20秒です。順番待ちで時間切れになった要求は実行しません。実行中の時間切れやキャンセルでは、結果が不明なタブに操作を重ねないよう、そのタブを閉じます。外部への変更がすでに起きた可能性は残ります。自動で再実行しません。
+- タブの終了要求にも応答しない場合は、該当する共有ワーカーを停止します。そのワーカーが持つ他のタブも失われます。
 - ブラウザが異常終了すると、そのブラウザのページは失われます。古いページIDを別のページへ割り当て直しません。
 - 接続先は `127.0.0.1` に限定し、Bearer認証とHost・Originの検証を行います。サービスは自身のOS権限で動作します。MCPにしても、OSの権限やCodexのツール承認はなくなりません。
 - 終了処理の対象は、自分で起動した専用ブラウザと一時プロファイルです。
@@ -65,6 +71,7 @@ python3 scripts/install.py
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+npm ci --ignore-scripts --prefix runtime
 DOZE_BROWSER_CHROME='/専用のChrome for Testing実行ファイルの絶対パス' cargo test --locked --test service -- --ignored --test-threads=1
 ```
 

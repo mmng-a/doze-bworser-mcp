@@ -1,0 +1,8 @@
+{
+  "name": "doze-bworser-mcp-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "chrome-devtools-mcp": "1.12.0"
+  }
+}

@@ -17,7 +17,12 @@ fn codex_metadata_keeps_the_host_identity_out_of_tool_arguments() {
 
 #[tokio::test]
 async fn invalid_parent_cycles_do_not_poison_registration() {
-    let manager = Manager::new("/missing/chrome".into(), Duration::from_secs(1));
+    let manager = Manager::new(
+        "/missing/chrome".into(),
+        Duration::from_secs(1),
+        "/missing/node".into(),
+        "/missing/devtools".into(),
+    );
     let child = Caller {
         thread: "child".into(),
         parent: Some("parent".into()),

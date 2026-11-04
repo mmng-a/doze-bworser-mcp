@@ -1,55 +1,40 @@
-//! Own browser processes globally and serialize only operations on the same page.
-
-use crate::cdp::Cdp;
+//! Share DevTools MCP workers and enforce caller ownership and page lifetimes.
+use crate::upstream::{self, Engine};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
-use tempfile::TempDir;
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::{Child, Command},
     sync::Mutex,
     time::{Instant, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
 const PAGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 pub struct Manager {
     chrome: PathBuf,
+    node: PathBuf,
+    devtools: PathBuf,
     operation_timeout: Duration,
     state: Mutex<State>,
 }
-
 #[derive(Default)]
 struct State {
-    engines: HashMap<bool, Engine>,
+    engines: HashMap<bool, Arc<Engine>>,
     pages: HashMap<String, Arc<Page>>,
     parents: HashMap<String, Option<String>>,
 }
-
-struct Engine {
-    child: Child,
-    cdp: Cdp,
-    contexts: HashMap<String, String>,
-    _profile: TempDir,
-}
-
 pub struct Page {
     pub id: String,
     owner: String,
     connection: String,
     root: String,
     headed: bool,
-    target: String,
-    session: String,
-    cdp: Cdp,
+    upstream_id: u64,
+    engine: Arc<Engine>,
     operation: Mutex<()>,
     last_used: std::sync::Mutex<Instant>,
-    elements: std::sync::Mutex<HashMap<String, u64>>,
 }
-
 #[derive(Clone, Debug)]
 pub struct Caller {
     pub thread: String,
@@ -88,14 +73,20 @@ impl Caller {
 }
 
 impl Manager {
-    pub fn new(chrome: PathBuf, operation_timeout: Duration) -> Self {
+    pub fn new(
+        chrome: PathBuf,
+        operation_timeout: Duration,
+        node: PathBuf,
+        devtools: PathBuf,
+    ) -> Self {
         Self {
             chrome,
+            node,
+            devtools,
             operation_timeout,
             state: Mutex::default(),
         }
     }
-
     pub async fn register(&self, caller: &Caller) -> Result<()> {
         if caller.thread.is_empty() || caller.thread.len() > 200 {
             bail!("Invalid thread identity");
@@ -153,108 +144,81 @@ impl Manager {
         validate_url(url)?;
         self.register(caller).await?;
         let page = {
-            // Navigation happens after this registry lock is released.
             let mut state = self.state.lock().await;
             let root = Self::root(&state, &caller.thread)?;
-            if state
-                .engines
-                .get(&headed)
-                .is_some_and(|engine| !engine.cdp.is_alive())
-            {
-                state.pages.retain(|_, page| page.headed != headed);
-                if let Some(mut engine) = state.engines.remove(&headed) {
+            if state.engines.get(&headed).is_some_and(|e| !e.alive()) {
+                state.pages.retain(|_, p| p.headed != headed);
+                if let Some(engine) = state.engines.remove(&headed) {
                     engine.stop().await;
                 }
             }
             if let std::collections::hash_map::Entry::Vacant(entry) = state.engines.entry(headed) {
-                entry.insert(Engine::launch(&self.chrome, headed).await?);
+                entry.insert(
+                    Engine::launch(&self.node, &self.devtools, &self.chrome, headed).await?,
+                );
             }
-            let mut allocated_target = None;
-            let allocation: Result<Arc<Page>> = async {
-                let engine = state.engines.get_mut(&headed).expect("engine was inserted");
-                let context = if let Some(context) = engine.contexts.get(&root) {
-                    context.clone()
-                } else {
-                    let result = engine
-                        .cdp
-                        .call(
-                            None,
-                            "Target.createBrowserContext",
-                            json!({"disposeOnDetach":true}),
-                        )
-                        .await?;
-                    let context = string(&result, "browserContextId")?;
-                    engine.contexts.insert(root.clone(), context.clone());
-                    context
-                };
-                let target = engine
-                    .cdp
-                    .call(
-                        None,
-                        "Target.createTarget",
-                        json!({
-                            "url":"about:blank", "browserContextId":context, "background":true,
-                        }),
-                    )
-                    .await?;
-                let target = string(&target, "targetId")?;
-                allocated_target = Some(target.clone());
-                let session = engine
-                    .cdp
-                    .call(
-                        None,
-                        "Target.attachToTarget",
-                        json!({"targetId":target,"flatten":true}),
-                    )
-                    .await?;
-                let page = Arc::new(Page {
-                    id: Uuid::new_v4().to_string(),
-                    owner: caller.thread.clone(),
-                    connection: caller.connection.clone(),
-                    root: root.clone(),
-                    headed,
-                    target,
-                    session: string(&session, "sessionId")?,
-                    cdp: engine.cdp.clone(),
-                    operation: Mutex::new(()),
-                    last_used: std::sync::Mutex::new(Instant::now()),
-                    elements: std::sync::Mutex::default(),
-                });
-                Ok(page)
-            }
+            let engine = state.engines[&headed].clone();
+            // Navigating inside new_page would hold DevTools' browser-wide queue.
+            let allocated = timeout(
+                Duration::from_secs(30),
+                engine.call(
+                    "new_page",
+                    json!({"url":"about:blank","background":true,"isolatedContext":root}),
+                ),
+            )
             .await;
-            let page = match allocation {
-                Ok(page) => page,
-                Err(error) => {
-                    if let Some(engine) = state.engines.get_mut(&headed)
-                        && let Some(target) = allocated_target
-                    {
-                        let _ = timeout(
-                            Duration::from_secs(2),
-                            engine
-                                .cdp
-                                .call(None, "Target.closeTarget", json!({"targetId":target})),
-                        )
-                        .await;
+            let allocated = match allocated {
+                Ok(Ok(result)) => result,
+                error => {
+                    if !state.pages.values().any(|p| p.headed == headed) {
+                        state.engines.remove(&headed);
+                        engine.stop().await;
                     }
-                    state.reap_unused(&root, headed).await;
-                    return Err(error);
+                    return Err(match error {
+                        Ok(Err(e)) => e,
+                        _ => anyhow!("DevTools page creation timed out"),
+                    });
                 }
             };
+            let backend = allocated["structuredContent"]["pages"]
+                .as_array()
+                .context("Missing created page")?
+                .iter()
+                .find(|p| p["selected"] == true && p["isolatedContext"] == root)
+                .and_then(|p| p["id"].as_u64())
+                .context("Missing created page ID")?;
+            let page = Arc::new(Page {
+                id: Uuid::new_v4().to_string(),
+                owner: caller.thread.clone(),
+                connection: caller.connection.clone(),
+                root,
+                headed,
+                upstream_id: backend,
+                engine,
+                operation: Mutex::new(()),
+                last_used: std::sync::Mutex::new(Instant::now()),
+            });
             state.pages.insert(page.id.clone(), page.clone());
             page
         };
-        let args = json!({"url":url,"width":1440,"height":900});
-        match self
-            .run(caller, &page.id, "navigate_page", args, cancel)
+        if let Err(error) = self
+            .run(
+                caller,
+                &page.id,
+                "navigate_page",
+                json!({"url":url}),
+                cancel,
+            )
             .await
         {
-            Ok(_) => Ok(json!({"page_id":page.id})),
-            Err(error) => {
-                let _ = self.close(caller, &page.id).await;
-                Err(error)
+            // A dialog blocks navigation without making the new page unusable.
+            if error.is::<upstream::PendingDialog>() {
+                bail!("page_id={}: {error}", page.id);
             }
+            let _ = self.close(caller, &page.id).await;
+            return Err(error);
         }
+        Ok(json!({"page_id":page.id}))
     }
 
     async fn page(&self, caller: &Caller, id: &str) -> Result<Arc<Page>> {
@@ -280,48 +244,34 @@ impl Manager {
         let page = self.page(caller, id).await?;
         let guard = tokio::select! {
             _ = cancel.cancelled() => bail!("Cancelled before execution; operation was not sent"),
-            result = timeout(self.operation_timeout, page.operation.lock()) =>
-                result.context("Timed out waiting for this page; operation was not sent")?,
+            result = timeout(self.operation_timeout, page.operation.lock()) => result.context("Timed out waiting for this page; operation was not sent")?,
         };
         self.page(caller, id).await?;
         if page.idle() {
             self.close(caller, id).await?;
             bail!("Page is closed or expired; open a new page with open_page");
         }
-        let mut events = page.cdp.events();
-        let dialog = page.cdp.dialog(&page.session);
-        if name == "handle_dialog" {
-            if dialog.is_none() {
-                bail!("No JavaScript dialog is open");
-            }
-        } else if let Some(dialog) = dialog {
-            return Err(dialog_error(&dialog));
-        }
-        let opening = async {
-            loop {
-                match events.recv().await {
-                    Ok(event)
-                        if event["sessionId"] == page.session
-                            && event["method"] == "Page.javascriptDialogOpening" =>
-                    {
-                        return Ok(event["params"].clone());
-                    }
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(error) => return Err(anyhow!(error)),
-                }
-            }
-        };
         let result = tokio::select! {
             _ = cancel.cancelled() => Err(anyhow!("Cancelled during execution; outcome may be unknown")),
-            dialog=opening, if name != "handle_dialog" => Err(dialog.map_or_else(|e| e, |d| dialog_error(&d))),
-            result = timeout(self.operation_timeout, page.perform(name, &args)) =>
-                result.unwrap_or_else(|_| Err(anyhow!("Operation timed out; outcome may be unknown"))),
+            result = timeout(self.operation_timeout,page.perform(name,&args,self.operation_timeout)) => result.unwrap_or_else(|_|Err(anyhow!("Operation timed out; outcome may be unknown"))),
         };
         if result
             .as_ref()
             .is_err_and(|e| e.to_string().contains("outcome may be unknown"))
+            && self.close(caller, id).await.is_err()
         {
-            let _ = self.close(caller, id).await;
+            let mut state = self.state.lock().await;
+            state
+                .pages
+                .retain(|_, p| !Arc::ptr_eq(&p.engine, &page.engine));
+            if state
+                .engines
+                .get(&page.headed)
+                .is_some_and(|e| Arc::ptr_eq(e, &page.engine))
+            {
+                state.engines.remove(&page.headed);
+            }
+            page.engine.stop().await;
         }
         *page.last_used.lock().unwrap() = Instant::now();
         drop(guard);
@@ -329,34 +279,39 @@ impl Manager {
     }
 
     pub async fn list(&self, caller: &Caller) -> Result<Value> {
-        let pages = self
-            .state
-            .lock()
-            .await
-            .pages
-            .values()
-            .filter(|p| p.owner == caller.thread && p.connection == caller.connection)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut result = Vec::new();
-        for page in pages {
-            let info = page
-                .cdp
-                .call(
-                    None,
-                    "Target.getTargetInfo",
-                    json!({"targetId":page.target}),
-                )
-                .await?;
-            result.push(json!({"page_id":page.id,"url":info["targetInfo"]["url"],"title":info["targetInfo"]["title"]}));
+        let mut state = self.state.lock().await;
+        let mut live = HashMap::new();
+        for (headed, engine) in &state.engines {
+            for page in engine.pages().await? {
+                live.insert(
+                    (
+                        *headed,
+                        page["id"].as_u64().context("Invalid DevTools page ID")?,
+                    ),
+                    page,
+                );
+            }
         }
-        Ok(json!(result))
+        state
+            .pages
+            .retain(|_, p| live.contains_key(&(p.headed, p.upstream_id)));
+        state.stop_unused().await;
+        Ok(json!(
+            state
+                .pages
+                .values()
+                .filter(|p| p.owner == caller.thread && p.connection == caller.connection)
+                .map(|p| {
+                    let info = &live[&(p.headed, p.upstream_id)];
+                    json!({"page_id":p.id,"url":info["url"],"title":info["title"]})
+                })
+                .collect::<Vec<_>>()
+        ))
     }
 
     pub async fn status(&self) -> Value {
         let state = self.state.lock().await;
-        json!({"name":"doze-bworser-mcp","version":env!("CARGO_PKG_VERSION"),
-            "browser_count":state.engines.len(),"page_count":state.pages.len()})
+        json!({"name":"doze-bworser-mcp","version":env!("CARGO_PKG_VERSION"),"browser_count":state.engines.len(),"page_count":state.pages.len()})
     }
 
     pub async fn close(&self, caller: &Caller, id: &str) -> Result<Value> {
@@ -367,19 +322,28 @@ impl Manager {
         if page.owner != caller.thread || page.connection != caller.connection {
             bail!("Page belongs to another caller");
         }
-        let page = state.pages.remove(id).expect("page exists");
-        let result = timeout(
-            Duration::from_secs(3),
-            page.cdp
-                .call(None, "Target.closeTarget", json!({"targetId":page.target})),
-        )
+        let page = page.clone();
+        let closed = timeout(Duration::from_secs(5), async {
+            let live = page.engine.pages().await?;
+            if live.iter().any(|p| p["id"] == page.upstream_id) {
+                page.engine
+                    .call("close_page", json!({"pageId":page.upstream_id}))
+                    .await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
         .await;
-        page.cdp.forget_session(&page.session);
-        state.reap_unused(&page.root, page.headed).await;
-        result.context("Timed out closing page")??;
+        let closed = closed.context("Timed out closing page").and_then(|r| r);
+        if closed.is_ok() {
+            state.pages.remove(id);
+        } else {
+            // Keep uncertain closures tracked and ineligible for further operations.
+            *page.last_used.lock().unwrap() = Instant::now() - PAGE_IDLE_TIMEOUT;
+        }
+        state.stop_unused().await;
+        closed?;
         Ok(json!("OK"))
     }
-
     pub async fn end_thread(&self, thread: &str) -> Result<()> {
         let pages = {
             let state = self.state.lock().await;
@@ -459,324 +423,105 @@ impl Manager {
     pub async fn shutdown(&self) {
         let mut state = self.state.lock().await;
         state.pages.clear();
-        for (_, mut engine) in state.engines.drain() {
+        for (_, engine) in state.engines.drain() {
             engine.stop().await;
         }
     }
 }
 
 impl State {
-    async fn reap_unused(&mut self, root: &str, headed: bool) {
-        if !self
-            .pages
-            .values()
-            .any(|p| p.root == root && p.headed == headed)
-            && let Some(engine) = self.engines.get_mut(&headed)
-            && let Some(context) = engine.contexts.remove(root)
-        {
-            let _ = timeout(
-                Duration::from_secs(3),
-                engine.cdp.call(
-                    None,
-                    "Target.disposeBrowserContext",
-                    json!({"browserContextId":context}),
-                ),
-            )
-            .await;
-        }
-        if !self.pages.values().any(|p| p.headed == headed)
-            && let Some(mut engine) = self.engines.remove(&headed)
-        {
-            engine.stop().await;
-        }
-    }
-}
-
-fn dialog_error(dialog: &Value) -> anyhow::Error {
-    anyhow!(
-        "JavaScript dialog ({}): {}. Use handle_dialog; do not repeat the original operation",
-        dialog["type"].as_str().unwrap_or("unknown"),
-        dialog["message"].as_str().unwrap_or("")
-    )
-}
-
-impl Engine {
-    async fn launch(chrome: &PathBuf, headed: bool) -> Result<Self> {
-        if !chrome.is_file() {
-            bail!("Chrome for Testing is missing: {}", chrome.display());
-        }
-        let profile = tempfile::tempdir()?;
-        let mut command = Command::new(chrome);
-        command
-            .args([
-                "--remote-debugging-port=0",
-                "--remote-debugging-address=127.0.0.1",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-background-networking",
-                "--disable-component-update",
-                "--disable-sync",
-                "--password-store=basic",
-                "--use-mock-keychain",
-            ])
-            .arg(format!("--user-data-dir={}", profile.path().display()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if !headed {
-            command.args(["--headless=new", "--hide-scrollbars", "--mute-audio"]);
-        }
-        command.arg("about:blank");
-        let mut child = command
-            .spawn()
-            .context("Could not launch the dedicated Chrome for Testing")?;
-        let mut lines =
-            BufReader::new(child.stderr.take().context("Missing browser stderr")?).lines();
-        let endpoint = timeout(Duration::from_secs(20), async {
-            while let Some(line) = lines.next_line().await? {
-                if let Some(endpoint) = line.strip_prefix("DevTools listening on ") {
-                    return Ok::<_, anyhow::Error>(endpoint.to_owned());
-                }
+    async fn stop_unused(&mut self) {
+        for headed in [false, true] {
+            if !self.pages.values().any(|p| p.headed == headed)
+                && let Some(engine) = self.engines.remove(&headed)
+            {
+                engine.stop().await;
             }
-            bail!("Chrome exited before providing a DevTools endpoint")
-        })
-        .await
-        .context("Chrome startup timed out")??;
-        tokio::spawn(async move { while matches!(lines.next_line().await, Ok(Some(_))) {} });
-        let cdp = Cdp::connect(&endpoint).await?;
-        Ok(Self {
-            child,
-            cdp,
-            contexts: HashMap::new(),
-            _profile: profile,
-        })
-    }
-
-    async fn stop(&mut self) {
-        let _ = timeout(
-            Duration::from_secs(2),
-            self.cdp.call(None, "Browser.close", json!({})),
-        )
-        .await;
-        if timeout(Duration::from_secs(3), self.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = self.child.kill().await;
-            let _ = self.child.wait().await;
         }
     }
 }
-
 impl Page {
     fn idle(&self) -> bool {
         self.last_used.lock().unwrap().elapsed() >= PAGE_IDLE_TIMEOUT
     }
-
-    async fn perform(&self, name: &str, args: &Value) -> Result<Value> {
-        match name {
+    async fn perform(&self, name: &str, args: &Value, deadline: Duration) -> Result<Value> {
+        let (tool, mut params) = match name {
             "navigate_page" => {
                 let url = args["url"].as_str().context("url must be a string")?;
                 validate_url(url)?;
-                self.elements.lock().unwrap().clear();
-                self.cdp
-                    .call(Some(&self.session), "Page.enable", json!({}))
-                    .await?;
-                if args.get("width").is_some() {
-                    self.viewport(args).await?;
-                }
-                let result = self
-                    .cdp
-                    .call(Some(&self.session), "Page.navigate", json!({"url":url}))
-                    .await?;
-                if let Some(error) = result["errorText"].as_str() {
-                    bail!("Navigation failed: {error}");
-                }
-                loop {
-                    let tree = self
-                        .cdp
-                        .call(Some(&self.session), "Page.getFrameTree", json!({}))
-                        .await?;
-                    let committed = result.get("loaderId").is_none()
-                        || tree["frameTree"]["frame"]["loaderId"] == result["loaderId"];
-                    if let Ok(state) = self
-                        .cdp
-                        .evaluate(
-                            &self.session,
-                            "({url:location.href,ready:document.readyState})",
-                        )
-                        .await
-                        && committed
-                        && state["url"] != "about:blank"
-                        && state["ready"] != "loading"
-                    {
-                        break;
-                    }
-                    if url == "about:blank" {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(40)).await;
-                }
+                (
+                    "navigate_page",
+                    json!({"url":url,"type":"url","timeout":deadline.as_millis().saturating_sub(300).max(1) as u64}),
+                )
             }
-            "inspect_page" => {
-                let tree = self
-                    .cdp
-                    .call(
-                        Some(&self.session),
-                        "Accessibility.getFullAXTree",
-                        json!({}),
-                    )
-                    .await?;
-                let (text, elements) = crate::snapshot::render(
-                    tree["nodes"]
-                        .as_array()
-                        .context("Missing accessibility tree")?,
-                );
-                *self.elements.lock().unwrap() = elements;
-                return Ok(json!(text));
+            "inspect_page" => ("take_snapshot", json!({})),
+            "click" => ("click", json!({"uid":args["element"]})),
+            "fill" => ("fill", json!({"uid":args["element"],"value":args["value"]})),
+            "press_key" => ("press_key", json!({"key":args["key"]})),
+            "handle_dialog" => (
+                "handle_dialog",
+                json!({"action":if args["accept"].as_bool().context("accept must be a boolean")? {"accept"}else{"dismiss"}}),
+            ),
+            "set_viewport" => {
+                let w = args["width"].as_u64().context("width must be an integer")?;
+                let h = args["height"]
+                    .as_u64()
+                    .context("height must be an integer")?;
+                if !(200..=3840).contains(&w) || !(200..=2160).contains(&h) {
+                    bail!("Viewport must be 200–3840 × 200–2160");
+                }
+                ("emulate", json!({"viewport":format!("{w}x{h}x1")}))
             }
+            "take_screenshot" => (
+                "take_screenshot",
+                json!({"format":"png","fullPage":args["full_page"].as_bool().unwrap_or(false)}),
+            ),
             "evaluate_script" => {
-                return self
-                    .cdp
-                    .evaluate(
-                        &self.session,
-                        args["expression"]
-                            .as_str()
-                            .context("expression must be a string")?,
-                    )
-                    .await;
-            }
-            "set_viewport" => self.viewport(args).await?,
-            "take_screenshot" => {
-                let full = args["full_page"].as_bool().unwrap_or(false);
-                let mut params = json!({"format":"png","captureBeyondViewport":full});
-                if full {
-                    let layout = self
-                        .cdp
-                        .call(Some(&self.session), "Page.getLayoutMetrics", json!({}))
-                        .await?;
-                    params["clip"] = json!({"x":0,"y":0,"width":layout["cssContentSize"]["width"],
-                        "height":layout["cssContentSize"]["height"],"scale":1});
-                }
-                let image = self
-                    .cdp
-                    .call(Some(&self.session), "Page.captureScreenshot", params)
-                    .await?;
-                return Ok(json!({"image":image["data"],"mime_type":"image/png"}));
+                let expression = args["expression"]
+                    .as_str()
+                    .context("expression must be a string")?;
+                (
+                    "evaluate_script",
+                    json!({"function":format!("async()=>{{let timer;try{{return await Promise.race([eval({}),new Promise((_,reject)=>{{timer=setTimeout(()=>reject(new Error(\"Operation timed out; outcome may be unknown\")),{})}})])}}finally{{clearTimeout(timer)}}}}",serde_json::to_string(expression)?,deadline.as_millis().saturating_sub(200).max(1)),"dialogAction":"dismiss","waitForStableDom":false}),
+                )
             }
             "scroll_page" => {
                 let x = args["x"].as_i64().unwrap_or(0);
                 let y = args["y"].as_i64().context("y must be an integer")?;
-                self.cdp
-                    .evaluate(&self.session, &format!("scrollTo({x},{y})"))
-                    .await?;
-            }
-            "click" | "fill" => {
-                let reference = args["element"]
-                    .as_str()
-                    .context("element must be a string from inspect_page")?;
-                let backend = *self
-                    .elements
-                    .lock()
-                    .unwrap()
-                    .get(reference)
-                    .context("Stale element; call inspect_page again")?;
-                let element = self
-                    .cdp
-                    .call(
-                        Some(&self.session),
-                        "DOM.resolveNode",
-                        json!({"backendNodeId":backend}),
-                    )
-                    .await
-                    .context("Stale element; call inspect_page again")?;
-                let object = element["object"]["objectId"]
-                    .as_str()
-                    .context("Stale element; call inspect_page again")?;
-                let result = if name == "fill" {
-                    self.cdp.call(Some(&self.session),"Runtime.callFunctionOn",json!({"objectId":object,
-                        "functionDeclaration":"function(value){if(!this.isConnected)throw new Error('Stale element; call inspect_page again');this.scrollIntoView({block:'center'});if(this.disabled||this.readOnly)throw new Error('Element is not editable');this.focus();if(this.isContentEditable)this.textContent=value;else {const proto=this instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(!setter)throw new Error('Element is not an input');setter.call(this,value);}this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}",
-                        "arguments":[{"value":args["value"].as_str().context("value must be a string")?}],"returnByValue":true})).await?
-                } else {
-                    self.cdp.call(Some(&self.session),"Runtime.callFunctionOn",json!({"objectId":object,
-                        "functionDeclaration":"function(){if(!this.isConnected)throw new Error('Stale element; call inspect_page again');this.scrollIntoView({block:'center'});const r=this.getBoundingClientRect();if(!r.width||!r.height||this.disabled)throw new Error('Element is not actionable');const x=Math.max(0,r.left)+Math.min(r.width,innerWidth-Math.max(0,r.left))/2;const y=Math.max(0,r.top)+Math.min(r.height,innerHeight-Math.max(0,r.top))/2;const hit=document.elementFromPoint(x,y);if(hit!==this&&!this.contains(hit))throw new Error('Element is covered by another element');return {x,y};}","returnByValue":true})).await?
-                };
-                if result.get("exceptionDetails").is_some() {
-                    bail!("Element operation failed: {}", result["exceptionDetails"]);
-                }
-                if name == "click" {
-                    let point = &result["result"]["value"];
-                    for kind in ["mousePressed", "mouseReleased"] {
-                        self.cdp.call(Some(&self.session),"Input.dispatchMouseEvent",json!({"type":kind,"x":point["x"],"y":point["y"],"button":"left","clickCount":1})).await?;
-                    }
-                }
-                let _ = self
-                    .cdp
-                    .call(
-                        Some(&self.session),
-                        "Runtime.releaseObject",
-                        json!({"objectId":object}),
-                    )
-                    .await;
-            }
-            "press_key" => {
-                let key = args["key"].as_str().context("key must be a string")?;
-                let code = match key {
-                    "Enter" => 13,
-                    "Tab" => 9,
-                    "Escape" => 27,
-                    "Backspace" => 8,
-                    "ArrowDown" => 40,
-                    "ArrowUp" => 38,
-                    "PageDown" => 34,
-                    "PageUp" => 33,
-                    _ => bail!("Unsupported key"),
-                };
-                for kind in ["keyDown", "keyUp"] {
-                    self.cdp
-                        .call(
-                            Some(&self.session),
-                            "Input.dispatchKeyEvent",
-                            json!({"type":kind,"key":key,"windowsVirtualKeyCode":code}),
-                        )
-                        .await?;
-                }
-            }
-            "handle_dialog" => {
-                self.cdp.call(Some(&self.session),"Page.handleJavaScriptDialog",json!({"accept":args["accept"].as_bool().context("accept must be a boolean")?})).await?;
+                (
+                    "evaluate_script",
+                    json!({"function":format!("()=>scrollTo({x},{y})"),"dialogAction":"dismiss","waitForStableDom":false}),
+                )
             }
             _ => bail!("Unknown browser operation"),
+        };
+        params["pageId"] = json!(self.upstream_id);
+        let result = self.engine.call(tool, params).await?;
+        match name {
+            "inspect_page" => Ok(json!(upstream::text(&result))),
+            "evaluate_script" => {
+                let text = upstream::text(&result);
+                let output = text
+                    .split_once("```json\n")
+                    .and_then(|(_, v)| v.rsplit_once("\n```").map(|(v, _)| v))
+                    .context("Missing DevTools evaluation result")?;
+                if output == "undefined" {
+                    Ok(Value::Null)
+                } else {
+                    Ok(serde_json::from_str(output)?)
+                }
+            }
+            "take_screenshot" => {
+                let image = result["content"]
+                    .as_array()
+                    .and_then(|cs| cs.iter().find(|c| c["type"] == "image"))
+                    .context("Missing DevTools screenshot")?;
+                Ok(json!({"image":image["data"]}))
+            }
+            _ => Ok(json!("OK")),
         }
-        Ok(json!("OK"))
-    }
-
-    async fn viewport(&self, args: &Value) -> Result<()> {
-        let width = args["width"].as_u64().context("width must be an integer")?;
-        let height = args["height"]
-            .as_u64()
-            .context("height must be an integer")?;
-        validate_viewport(width, height)?;
-        self.cdp
-            .call(
-                Some(&self.session),
-                "Emulation.setDeviceMetricsOverride",
-                json!({
-                    "width":width,"height":height,"deviceScaleFactor":1,"mobile":false,
-                }),
-            )
-            .await?;
-        Ok(())
     }
 }
-
-fn string(value: &Value, key: &str) -> Result<String> {
-    value[key]
-        .as_str()
-        .map(str::to_owned)
-        .with_context(|| format!("Missing CDP field {key}"))
-}
-
 fn validate_url(url: &str) -> Result<()> {
     if !(url.starts_with("https://") || url.starts_with("http://") || url == "about:blank") {
         bail!("Only http://, https:// and about:blank URLs are supported");
@@ -784,91 +529,53 @@ fn validate_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_viewport(width: u64, height: u64) -> Result<()> {
-    if !(200..=3840).contains(&width) || !(200..=2160).contains(&height) {
-        bail!("Viewport must be 200–3840 × 200–2160");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::{SinkExt, StreamExt};
-
-    async fn connection(
-        count: usize,
-        fail_first: bool,
-    ) -> (Cdp, tokio::task::JoinHandle<Vec<String>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-            let mut closed = Vec::new();
-            while let Some(Ok(message)) = socket.next().await {
-                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(request["method"], "Target.closeTarget");
-                closed.push(request["params"]["targetId"].as_str().unwrap().to_owned());
-                let response = if fail_first && closed.len() == 1 {
-                    json!({"id":request["id"],"error":{"message":"test close failure"}})
-                } else {
-                    json!({"id":request["id"],"result":{"success":true}})
-                };
-                socket
-                    .send(tokio_tungstenite::tungstenite::Message::Text(
-                        response.to_string().into(),
-                    ))
-                    .await
-                    .unwrap();
-                if closed.len() == count {
-                    break;
-                }
-            }
-            closed
-        });
-        (
-            Cdp::connect(&format!("ws://{address}")).await.unwrap(),
-            task,
-        )
-    }
-
-    fn page(cdp: &Cdp, id: &str, idle: bool) -> Arc<Page> {
-        Arc::new(Page {
-            id: id.into(),
-            owner: "owner".into(),
-            connection: "connection".into(),
-            root: "owner".into(),
-            headed: false,
-            target: id.into(),
-            session: id.into(),
-            cdp: cdp.clone(),
-            operation: Mutex::new(()),
-            elements: std::sync::Mutex::default(),
-            last_used: std::sync::Mutex::new(if idle {
-                Instant::now() - PAGE_IDLE_TIMEOUT
-            } else {
-                Instant::now()
-            }),
-        })
-    }
-
-    #[tokio::test]
-    async fn idle_pages_expire_but_fresh_and_busy_pages_survive() {
-        let (cdp, closed) = connection(3, false).await;
-        let manager = Manager::new("/missing/chrome".into(), Duration::from_secs(1));
-        let expired = page(&cdp, "expired", true);
-        let fresh = page(&cdp, "fresh", false);
-        let busy = page(&cdp, "busy", true);
-        let guard = busy.operation.lock().await;
-        for p in [&expired, &fresh, &busy] {
+    async fn setup(fail: bool) -> (Manager, Arc<Page>) {
+        let manager = Manager::new(
+            "/missing".into(),
+            Duration::from_secs(1),
+            "/missing".into(),
+            "/missing".into(),
+        );
+        let engine = crate::upstream::mock(fail).await;
+        manager
+            .state
+            .lock()
+            .await
+            .engines
+            .insert(false, engine.clone());
+        let mut last = None;
+        for id in 1..=3 {
+            let page = Arc::new(Page {
+                id: id.to_string(),
+                owner: "owner".into(),
+                connection: "connection".into(),
+                root: "owner".into(),
+                headed: false,
+                upstream_id: id,
+                engine: engine.clone(),
+                operation: Mutex::new(()),
+                last_used: std::sync::Mutex::new(Instant::now()),
+            });
             manager
                 .state
                 .lock()
                 .await
                 .pages
-                .insert(p.id.clone(), p.clone());
+                .insert(page.id.clone(), page.clone());
+            last = Some(page);
         }
+        (manager, last.unwrap())
+    }
+    #[tokio::test]
+    async fn idle_pages_expire_but_fresh_and_busy_pages_survive() {
+        let (manager, busy) = setup(false).await;
+        let expired = manager.state.lock().await.pages["1"].clone();
+        *expired.last_used.lock().unwrap() = Instant::now() - PAGE_IDLE_TIMEOUT;
+        *busy.last_used.lock().unwrap() = Instant::now() - PAGE_IDLE_TIMEOUT;
+        let guard = busy.operation.lock().await;
         manager.expire_idle().await;
         assert_eq!(manager.status().await["page_count"], 2);
         let caller = Caller {
@@ -876,38 +583,32 @@ mod tests {
             parent: None,
             connection: "connection".into(),
         };
-        let error = manager
-            .run(
-                &caller,
-                "expired",
-                "inspect_page",
-                json!({}),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("open a new page"));
-        *fresh.last_used.lock().unwrap() = Instant::now() - PAGE_IDLE_TIMEOUT;
+        assert!(
+            manager
+                .run(
+                    &caller,
+                    "1",
+                    "inspect_page",
+                    json!({}),
+                    CancellationToken::new()
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("open a new page")
+        );
         drop(guard);
         manager.expire_idle().await;
-        assert_eq!(manager.status().await["page_count"], 0);
-        assert_eq!(closed.await.unwrap().len(), 3);
+        assert_eq!(manager.status().await["page_count"], 1);
+        manager.shutdown().await;
     }
-
     #[tokio::test]
     async fn thread_cleanup_continues_after_a_close_failure() {
-        let (cdp, closed) = connection(2, true).await;
-        let manager = Manager::new("/missing/chrome".into(), Duration::from_secs(1));
-        for id in ["first", "second"] {
-            manager
-                .state
-                .lock()
-                .await
-                .pages
-                .insert(id.into(), page(&cdp, id, false));
-        }
+        let (manager, _) = setup(true).await;
         assert!(manager.end_thread("owner").await.is_err());
+        assert_eq!(manager.status().await["page_count"], 1);
+        manager.expire_idle().await;
         assert_eq!(manager.status().await["page_count"], 0);
-        assert_eq!(closed.await.unwrap().len(), 2);
+        assert_eq!(manager.status().await["browser_count"], 0);
     }
 }

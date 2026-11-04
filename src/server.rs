@@ -29,8 +29,18 @@ pub struct Config {
     pub port: u16,
     pub token: String,
     pub chrome_path: PathBuf,
+    #[serde(default = "default_node")]
+    pub node_path: PathBuf,
+    #[serde(default = "default_devtools")]
+    pub devtools_path: PathBuf,
     #[serde(default = "default_timeout")]
     pub operation_timeout_seconds: u64,
+}
+pub fn default_node() -> PathBuf {
+    PathBuf::from("node")
+}
+pub fn default_devtools() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share/doze-bworser-mcp/runtime/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js")
 }
 fn default_timeout() -> u64 {
     20
@@ -180,7 +190,7 @@ fn catalog() -> Vec<Tool> {
         ),
         (
             "inspect_page",
-            "Read the Chromium accessibility tree as DevTools-style text. Pass a uid to click or fill as element; references are refreshed on each inspection.",
+            "Read the Chromium accessibility tree as DevTools-style text. Pass a uid to click or fill as element; use the latest inspection for element references.",
             page.clone(),
             vec!["page_id"],
             true,
@@ -381,6 +391,8 @@ pub async fn serve(config: Config) -> Result<()> {
     let manager = Arc::new(Manager::new(
         config.chrome_path.clone(),
         Duration::from_secs(config.operation_timeout_seconds),
+        config.node_path.clone(),
+        config.devtools_path.clone(),
     ));
     let cancel = CancellationToken::new();
     let app = application(config.clone(), manager.clone(), cancel.clone());

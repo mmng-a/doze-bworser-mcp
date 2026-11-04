@@ -31,13 +31,24 @@ impl Service {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let token = "test-token-that-is-long-enough-for-local-tests".to_string();
-        let manager = Arc::new(Manager::new(chrome.clone(), Duration::from_secs(seconds)));
+        let manager = Arc::new(Manager::new(
+            chrome.clone(),
+            Duration::from_secs(seconds),
+            "node".into(),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/runtime/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+            )
+            .into(),
+        ));
         let cancel = CancellationToken::new();
         let app = application(
             Config {
                 port,
                 token: token.clone(),
                 chrome_path: chrome,
+                node_path: "node".into(),
+                devtools_path: "/unused".into(),
                 operation_timeout_seconds: seconds,
             },
             manager.clone(),
@@ -223,6 +234,8 @@ async fn fixture() -> (String, CancellationToken) {
     use axum::{Router, response::Html, routing::get};
     let app=Router::new().route("/",get(||async {Html("<title>Fixture</title><h1>Browser fixture</h1><input aria-label='Name'><button onclick=\"document.querySelector('h1').textContent='Clicked'\">Apply</button>" )}))
         .route("/slow",get(||async {tokio::time::sleep(Duration::from_millis(1200)).await;Html("<title>Slow fixture</title><h1>Ready</h1>")}));
+    let app = app.route("/regression",get(||async {Html(r#"<title>Regression</title><div contenteditable="true" aria-label="Editor"></div><div onclick="globalThis.textClicks=1">Clickable text</div><form onsubmit="event.preventDefault();globalThis.submitted=true"><input aria-label="Name"><button>Submit</button></form>"#)}))
+        .route("/alert",get(||async {Html("<script>alert('initial')</script><h1>Ready</h1>")}));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let cancel = CancellationToken::new();
@@ -276,11 +289,8 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     let start = Instant::now();
-    assert_eq!(
-        b.ok("evaluate_script", json!({"page_id":pb,"expression":"6*7"}))
-            .await,
-        42
-    );
+    let inspected = b.ok("inspect_page", json!({"page_id":pb})).await;
+    assert!(inspected.as_str().unwrap().contains("Fixture"));
     assert!(
         start.elapsed() < Duration::from_millis(800),
         "slow navigation blocked an unrelated page"
@@ -391,11 +401,6 @@ async fn real_browser_shares_isolates_and_runs_pages_concurrently() {
     );
     let refreshed = a.ok("inspect_page", json!({"page_id":pa})).await;
     assert!(refreshed.as_str().unwrap().contains("value=\"Example\""));
-    assert_eq!(
-        a.tool("click", json!({"page_id":pa,"element":button}))
-            .await["isError"],
-        true
-    );
     let pages = a.ok("list_pages", json!({})).await;
     assert_eq!(pages[0]["title"], "Fixture");
     assert_eq!(pages[0]["url"], url);
@@ -481,6 +486,117 @@ async fn timed_out_page_is_closed_without_blocking_other_pages() {
         42
     );
     a.ok("close_page", json!({"page_id":pb})).await;
+    a.finish().await;
+    stop.cancel();
+    service.manager.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "launches the explicitly configured dedicated headless Chrome for Testing"]
+async fn devtools_handles_editable_text_enter_closed_tabs_and_initial_dialogs() {
+    let chrome = std::env::var_os("DOZE_BROWSER_CHROME").expect("Set DOZE_BROWSER_CHROME");
+    let service = Service::start(chrome.into(), 5).await;
+    let (url, stop) = fixture().await;
+    let a = service.caller("regression").await;
+    let p = a
+        .ok("open_page", json!({"url":format!("{url}regression")}))
+        .await["page_id"]
+        .clone();
+    let snapshot = a.ok("inspect_page", json!({"page_id":p})).await;
+    let text = snapshot.as_str().unwrap();
+    let uid = |needle: &str| {
+        text.lines()
+            .find(|l| l.contains(needle))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .strip_prefix("uid=")
+            .unwrap()
+            .to_string()
+    };
+    let editor = uid("generic \"Editor\"");
+    a.ok(
+        "fill",
+        json!({"page_id":p,"element":editor,"value":"Hello"}),
+    )
+    .await;
+    assert_eq!(a.ok("evaluate_script",json!({"page_id":p,"expression":"document.querySelector('[contenteditable]').innerText"})).await,"Hello");
+    let label = text
+        .lines()
+        .find(|l| l.contains("\"Clickable text\""))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .strip_prefix("uid=")
+        .unwrap();
+    a.ok("click", json!({"page_id":p,"element":label})).await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":p,"expression":"globalThis.textClicks"})
+        )
+        .await,
+        1
+    );
+    a.ok(
+        "fill",
+        json!({"page_id":p,"element":uid("textbox \"Name\""),"value":"Example"}),
+    )
+    .await;
+    a.ok("press_key", json!({"page_id":p,"key":"Enter"})).await;
+    assert_eq!(
+        a.ok(
+            "evaluate_script",
+            json!({"page_id":p,"expression":"globalThis.submitted"})
+        )
+        .await,
+        true
+    );
+    let alert = a
+        .tool("open_page", json!({"url":format!("{url}alert")}))
+        .await;
+    assert_eq!(alert["isError"], true);
+    assert!(alert.to_string().contains("page_id="), "{alert}");
+    let pages = a.ok("list_pages", json!({})).await;
+    let alert_page = pages
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["url"].as_str().unwrap().ends_with("/alert"))
+        .unwrap()["page_id"]
+        .clone();
+    a.ok("handle_dialog", json!({"page_id":alert_page,"accept":true}))
+        .await;
+    assert!(
+        a.ok("inspect_page", json!({"page_id":alert_page}))
+            .await
+            .as_str()
+            .unwrap()
+            .contains("Ready")
+    );
+    a.ok("close_page", json!({"page_id":alert_page})).await;
+    let other = a.ok("open_page", json!({"url":"about:blank"})).await["page_id"].clone();
+    let _ = a
+        .tool(
+            "evaluate_script",
+            json!({"page_id":other,"expression":"setTimeout(()=>window.close(),0);true"}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let pages = a.ok("list_pages", json!({})).await;
+    assert_eq!(pages.as_array().unwrap().len(), 1, "{pages}");
+    assert_eq!(pages[0]["page_id"], p);
+    assert!(
+        a.ok("inspect_page", json!({"page_id":p}))
+            .await
+            .as_str()
+            .unwrap()
+            .contains("Regression")
+    );
+    a.ok("close_page", json!({"page_id":p})).await;
+    assert_eq!(service.manager.status().await["browser_count"], 0);
     a.finish().await;
     stop.cancel();
     service.manager.shutdown().await;

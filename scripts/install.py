@@ -47,6 +47,20 @@ def main():
         }
     if not Path(settings["chrome_path"]).is_file():
         raise SystemExit("Configure chrome_path with a dedicated Chrome for Testing executable.")
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if not node or not npm:
+        raise SystemExit("Install Node.js and npm before running the installer.")
+    runtime = user_dir / ".local/share/doze-bworser-mcp/runtime"
+    entry = runtime / "node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+    lock = root / "runtime/package-lock.json"
+    if not entry.is_file() or not (runtime / "package-lock.json").is_file() or (runtime / "package-lock.json").read_bytes() != lock.read_bytes():
+        runtime.mkdir(parents=True, exist_ok=True)
+        for name in ["package.json", "package-lock.json"]:
+            shutil.copy2(root / "runtime" / name, runtime / name)
+        subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=runtime, check=True)
+    settings["node_path"] = node
+    settings["devtools_path"] = str(entry)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     settings_path.chmod(0o600)
     binary = user_dir / ".local/bin/doze-bworser-mcp"
