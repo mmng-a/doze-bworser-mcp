@@ -90,4 +90,4 @@ DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' cargo test --locked --t
 
 Default tests check concurrent cold startup, SDK schemas, ownership metadata, native locks, installer preservation, queue cancellation, dialog ordering, and cleanup without starting Chrome. The optional real-browser test uses a local fixture and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation.
 
-CI runs formatting, Clippy, Rust, Node and installer checks on macOS, Linux and Windows for pushes and pull requests. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
+CI runs formatting, Clippy, Rust, Node and installer checks on Linux and Windows for pushes and pull requests. macOS runs only when CI is started manually with Run workflow or `gh workflow run ci.yml`. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
