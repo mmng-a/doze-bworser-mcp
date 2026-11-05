@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
 use doze_bworser_mcp::{connection, local_config, proxy, read_config, supervise};
-use serde_json::Value;
 use std::path::PathBuf;
 
 #[tokio::main(flavor = "current_thread")]
@@ -38,7 +37,7 @@ async fn main() -> Result<()> {
         }
         "supervise" => supervise(&path, &config),
         "status" | "stop" => {
-            connection(&path, &config, command, Value::Null, false).await?;
+            connection(&path, &config, command, false).await?;
             Ok(())
         }
         _ => bail!("Unknown command"),

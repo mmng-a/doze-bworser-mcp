@@ -183,14 +183,13 @@ pub async fn connection(
     path: &Path,
     config: &Config,
     command: &str,
-    payload: Value,
     start: bool,
 ) -> Result<BufReader<Stream>> {
     let mut supervisor: Option<std::process::Child> = None;
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match connect(config).await {
-                Ok(stream) => match authenticate(stream, config, command, &payload).await {
+                Ok(stream) => match authenticate(stream, config, command).await {
                     Ok(Handshake::Ready(stream)) => return Ok(stream),
                     Ok(Handshake::Stopping) if command == "mcp" => {}
                     Ok(Handshake::Stopping) => {
@@ -268,12 +267,7 @@ fn disconnected(error: &anyhow::Error) -> bool {
         })
 }
 
-async fn authenticate(
-    stream: Stream,
-    config: &Config,
-    command: &str,
-    payload: &Value,
-) -> Result<Handshake> {
+async fn authenticate(stream: Stream, config: &Config, command: &str) -> Result<Handshake> {
     let mut stream = BufReader::new(stream);
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce)
@@ -299,13 +293,7 @@ async fn authenticate(
     let proof = hex::encode(client.finalize().into_bytes());
     stream
         .get_mut()
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"proof":proof,"command":command,"payload":payload})
-            )
-            .as_bytes(),
-        )
+        .write_all(format!("{}\n", json!({"proof":proof,"command":command})).as_bytes())
         .await?;
     let reply = greeting(&mut stream).await?;
     if reply["ok"] != true {
@@ -342,7 +330,7 @@ async fn greeting(stream: &mut BufReader<Stream>) -> Result<Value> {
 }
 
 pub async fn proxy(path: &Path, config: &Config) -> Result<()> {
-    let mut stream = connection(path, config, "mcp", Value::Null, true).await?;
+    let mut stream = connection(path, config, "mcp", true).await?;
     let (mut read, mut write) = tokio::io::split(&mut stream);
     let mut input = tokio::io::stdin();
     let mut output = tokio::io::stdout();
