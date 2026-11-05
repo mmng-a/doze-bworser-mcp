@@ -16,7 +16,6 @@ const manager = new BrowserManager(config, new Map(Object.entries(savedParents))
 const clients = new Map();
 const sockets = new Set();
 let closing = false;
-let stopping = false;
 let idle;
 function saveParents() {
   const pending = parentsPath + '.new';
@@ -29,8 +28,7 @@ function idleExit() {
   if (!clients.size && !closing) idle = setTimeout(() => void stop(), 3000);
 }
 async function stop() {
-  if (stopping) return;
-  stopping = true;
+  if (closing) return;
   closing = true;
   clearTimeout(idle);
   server.close();
@@ -97,14 +95,7 @@ const server = net.createServer(socket => {
         socket.resume();
       } else {
         if (request.command === 'status') reply(socket, { connections: clients.size, pages: manager.pages.size, browsers: manager.engines.size });
-        else if (request.command === 'stop') {
-          if (clients.size || manager.pages.size) throw new Error('Service is in use; close MCP connections before updating');
-          closing = true;
-          reply(socket, 'Stopping');
-          socket.end();
-          setImmediate(() => void stop());
-          return;
-        } else throw new Error('Unknown IPC command');
+        else throw new Error('Unknown IPC command');
         socket.end();
         idleExit();
       }

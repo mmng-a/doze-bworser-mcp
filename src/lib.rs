@@ -218,7 +218,7 @@ pub async fn connection(
                             .open(path.with_file_name("service.log"))?;
                         let mut child = Command::new(std::env::current_exe()?);
                         child
-                            .args(["supervise", "--config"])
+                            .args(["--internal", "supervise"])
                             .arg(path)
                             .stdin(Stdio::null())
                             .stdout(log.try_clone()?)

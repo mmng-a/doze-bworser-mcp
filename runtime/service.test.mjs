@@ -15,7 +15,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 class Client {
   constructor(path, env = process.env, requestTimeout = 15_000) {
-    this.child = spawn(binary, path ? ['proxy', '--config', path] : ['proxy'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.child = spawn(binary, path ? ['--internal', 'proxy', path] : ['proxy'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.requestTimeout = requestTimeout;
     this.pending = new Map();
     this.next = 1;
@@ -73,7 +73,7 @@ async function fixture(t) {
     await Promise.all(clients.map(c => c.child.exitCode === null ? c.close() : undefined));
     // Node exits on its own after its last MCP connection closes.
     await delay(3400);
-    assert.notEqual(spawnSync(binary, ['status', '--config', path]).status, 0, 'last disconnect must stop the shared endpoint');
+    assert.notEqual(spawnSync(binary, ['--internal', 'status', path]).status, 0, 'last disconnect must stop the shared endpoint');
     const logs = readFileSync(join(directory, 'service.log'), 'utf8');
     if (logs.trim()) t.diagnostic(logs.slice(-5000));
     rmSync(directory, { recursive: true, force: true });
@@ -81,8 +81,7 @@ async function fixture(t) {
   });
   return {
     async client() { const c = new Client(path); clients.push(c); return c.initialize(); },
-    status() { return JSON.parse(execFileSync(binary, ['status', '--config', path], { encoding: 'utf8' })); },
-    path, socket,
+    status() { return JSON.parse(execFileSync(binary, ['--internal', 'status', path], { encoding: 'utf8' })); },
   };
 }
 
@@ -99,9 +98,6 @@ test('concurrent stdio launchers share one cold Node endpoint and SDK schemas', 
   await one.close();
   await delay(50);
   assert.equal(f.status().connections, 2);
-  // A running endpoint rejects explicit shutdown.
-  const stop = spawn(binary, ['stop', '--config', f.path]);
-  assert.notEqual(await new Promise(resolve => stop.once('exit', resolve)), 0);
 });
 
 test('real Chromium: ownership, native input, dialogs, ordering, cancellation and cleanup', { skip: !binary || !process.env.DOZE_BROWSER_CHROME, timeout: 60_000 }, async t => {
@@ -190,7 +186,7 @@ test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip:
   });
   await new Promise(resolve => server.listen(socket, resolve));
   t.after(() => { server.close(); rmSync(directory, { recursive: true, force: true }); });
-  const child = spawn(binary, ['proxy', '--config', path], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(binary, ['--internal', 'proxy', path], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdout.resume();
   let errors = '';
   child.stderr.on('data', chunk => { errors += chunk; });
@@ -235,7 +231,7 @@ test('only startup transport failures reconnect; accepted MCP bytes are never re
       });
     });
     await new Promise(resolve => server.listen(socket, resolve));
-    const child = spawn(binary, ['proxy', '--config', path], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(binary, ['--internal', 'proxy', path], { stdio: ['pipe', 'pipe', 'pipe'] });
     const deadline = setTimeout(() => child.kill(), 5000);
     let output = '';
     let errors = '';

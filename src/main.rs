@@ -7,7 +7,7 @@ async fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|arg| arg == "--help") {
         println!(
-            "doze-bworser-mcp [proxy|status|stop] [--config PATH]\nOne shared Node MCP endpoint, started on demand through local IPC."
+            "doze-bworser-mcp [proxy|status]\nOne shared Node MCP endpoint, started on demand through local IPC."
         );
         return Ok(());
     }
@@ -15,15 +15,22 @@ async fn main() -> Result<()> {
         println!("doze-bworser-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let command = args.first().map(String::as_str).unwrap_or("proxy");
-    let (path, config) = match args.as_slice() {
-        [] | [_] => local_config()?,
-        [_, flag, path] if flag == "--config" => {
-            let path = PathBuf::from(path);
-            let config = read_config(&path)?;
-            (path, config)
+    let (command, config_path) = match args.as_slice() {
+        [] => ("proxy", None),
+        [command] if matches!(command.as_str(), "proxy" | "status") => (command.as_str(), None),
+        [flag, command, path]
+            if flag == "--internal"
+                && matches!(command.as_str(), "proxy" | "status" | "supervise") =>
+        {
+            (command.as_str(), Some(PathBuf::from(path)))
         }
-        _ => bail!("Expected [proxy|status|stop] [--config PATH]"),
+        _ => bail!("Expected [proxy|status]"),
+    };
+    let (path, config) = if let Some(path) = config_path {
+        let config = read_config(&path)?;
+        (path, config)
+    } else {
+        local_config()?
     };
     match command {
         "proxy" => {
@@ -36,7 +43,7 @@ async fn main() -> Result<()> {
             std::process::exit(0);
         }
         "supervise" => supervise(&path, &config),
-        "status" | "stop" => {
+        "status" => {
             connection(&path, &config, command, false).await?;
             Ok(())
         }

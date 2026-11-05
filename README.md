@@ -13,7 +13,7 @@ A local MCP endpoint that shares a dedicated Chrome for Testing across Codex thr
 | Shared Node endpoint | Official MCP SDK, Puppeteer, ownership, queues, cancellation | Until the last connection closes, then a short cleanup delay |
 | Dedicated Chromium | Render and operate pages | First `open_page` through last page closure |
 
-Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status controls. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
+Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
 
 Normal headless pages share one browser globally per OS user. Explicit joint viewing uses one separate headed browser. Storage is isolated by root thread; each caller owns its own pages. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
 
