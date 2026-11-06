@@ -280,6 +280,57 @@ test('real Chromium: project state survives tab closure, timeout, disconnect and
   assert.equal(f.status().browsers, 2, 'the plain folder and Git root use one browser each');
 });
 
+test('real Chromium: mismatched Git roots open isolated temporary pages with a warning and preserve saved profiles', { skip: !binary || !process.env.DOZE_BROWSER_CHROME, timeout: 60_000 }, async t => {
+  const server = createServer((req, res) => res.end('<title>Temporary storage</title>'));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const f = await fixture(t);
+  const outer = join(f.directory, 'outer');
+  const inner = join(outer, 'inner');
+  const another = join(outer, 'another');
+  mkdirSync(inner, { recursive: true });
+  mkdirSync(another);
+  for (const folder of [outer, inner, another]) execFileSync('git', ['init', '--quiet', folder]);
+  const [parent, child, otherFolder, otherThread] = await Promise.all([f.client(outer), f.client(inner), f.client(another), f.client(inner)]);
+  const open = async (client, thread) => {
+    const result = await client.tool('open_page', { url }, thread);
+    assert.deepEqual(Object.keys(value(result)), ['page_id']);
+    return { id: value(result).page_id, result };
+  };
+  const write = (client, page, thread, account) => client.tool('evaluate_script', { page_id: page.id,
+    expression: `localStorage.setItem('account', ${JSON.stringify(account)}); document.cookie = ${JSON.stringify('account=' + account + '; path=/')}; 'OK'` }, thread);
+  const check = async (client, page, thread, account) => assert.deepEqual(value(await client.tool('evaluate_script', { page_id: page.id,
+    expression: "({account: localStorage.getItem('account'), cookie: document.cookie})" }, thread)),
+  { account, cookie: account === null ? '' : 'account=' + account });
+  const parentPage = await open(parent, 'parent');
+  await write(parent, parentPage, 'parent', 'parent-account');
+  const saved = await open(child, 'worker');
+  await write(child, saved, 'worker', 'child-account');
+  await child.tool('close_page', { page_id: saved.id }, 'worker');
+  const head = readFileSync(join(inner, '.git', 'HEAD'));
+  for (const folder of [inner, another]) rmSync(join(folder, '.git', 'HEAD'));
+  const temporary = await open(child, 'worker');
+  assert.equal(temporary.result.content.length, 2);
+  assert.match(temporary.result.content[1].text, /Git.*一時/);
+  await check(child, temporary, 'worker', null);
+  await write(child, temporary, 'worker', 'temporary-account');
+  const separateFolder = await open(otherFolder, 'worker');
+  await check(otherFolder, separateFolder, 'worker', null);
+  const separateThread = await open(otherThread, 'other-worker');
+  await check(otherThread, separateThread, 'other-worker', null);
+  await child.tool('close_page', { page_id: temporary.id }, 'worker');
+  const reopened = await open(child, 'worker');
+  assert.equal(reopened.result.content.length, 2);
+  await check(child, reopened, 'worker', null);
+  await child.tool('close_page', { page_id: reopened.id }, 'worker');
+  writeFileSync(join(inner, '.git', 'HEAD'), head);
+  const restored = await open(child, 'worker');
+  assert.equal(restored.result.content.length, 1);
+  await check(child, restored, 'worker', 'child-account');
+  await check(parent, parentPage, 'parent', 'parent-account');
+});
+
 test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip: !binary }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'doze-auth-'));
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-auth-${randomUUID()}` : `/tmp/doze-auth-${randomUUID()}.sock`;

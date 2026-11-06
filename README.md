@@ -26,7 +26,7 @@ Working folders come automatically from `sandboxCwd` in Codex's experimental `co
 | Inside Git | The worktree root, shared across subfolders and Codex projects using that root |
 | Outside Git | The canonical working folder, persisted independently for each folder |
 
-Symlinks to the same folder share storage. Separate checkouts and worktrees use separate storage. Git-managed folders require the Git executable. Broken Git metadata or a failed Git invocation returns an error instead of switching storage locations. Folders outside Git do not invoke Git.
+Symlinks to the same folder share storage. Separate checkouts and worktrees use separate storage. Git-managed folders require the Git executable. If the folder containing the nearest `.git` entry and the root returned by Git do not match, the page opens in an isolated temporary context without saved login state, and the result includes a warning. Temporary contexts are isolated by root thread and working folder and discarded when all their pages close. Saved profiles are left unchanged. Other discovery failures, including failed Git invocations, return an error. Folders outside Git do not invoke Git.
 
 Profiles are stored under `~/.config/doze-bworser-mcp/profiles/<hash-of-git-root-or-working-folder>/`. Cookies, localStorage, IndexedDB and other profile data survive tab closure, operation timeouts, MCP disconnections and service restarts. Chrome's session restoration also retains session cookies. Previous tabs are not reopened and operations are not replayed. Site-side expiration or revocation still requires signing in again. Unsaved changes immediately before an unexpected process exit may be lost.
 
@@ -83,7 +83,7 @@ MCP does not remove OS restrictions or tool approval requirements. Hosts that sa
 | `handle_dialog` | `page_id`, `accept` | `OK` after the interrupted operation settles, or the next dialog |
 | `close_page` | `page_id` | `OK` after closure |
 
-Results use MCP `content` only. URLs must be HTTP(S) or `about:blank`. Public schemas and argument validation come from the same Zod definitions through the official MCP SDK; strings such as `"false"` are not accepted as booleans.
+Results use MCP `content` only. For `open_page`, the first text block contains `{ "page_id": "…" }`; a separate text block contains a warning when temporary storage is used because of a Git root mismatch. Relay this warning to the user. URLs must be HTTP(S) or `about:blank`. Public schemas and argument validation come from the same Zod definitions through the official MCP SDK; strings such as `"false"` are not accepted as booleans.
 
 Use `inspect_page` before element operations. Only references from the latest completed inspection are valid. Native HTML options use Puppeteer's selection API; disabled or ambiguous options return errors. Custom widgets use normal clicks. The initial viewport is 1440×900; viewport emulation does not resize the user's window. Headed mode is only for explicit joint viewing. Formal project capture/check CLIs take precedence for deliverables.
 

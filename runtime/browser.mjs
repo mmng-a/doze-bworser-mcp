@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { PageController, PageClosed } from './controller.mjs';
 import { inspect } from './snapshot.mjs';
-import { workspaceKey, prepareProfile } from './profiles.mjs';
+import { workspaceKey, prepareProfile, GitRootMismatch } from './profiles.mjs';
 
 /** Use Puppeteer's selection API for native options, preserving ordinary widget clicks. */
 async function selectOption(handle) {
@@ -84,8 +84,18 @@ export class BrowserManager {
     validateUrl(url);
     const id = randomUUID();
     if (caller.codex && !caller.cwd) throw new Error('Codex did not provide sandboxCwd. Update Codex and reconnect the MCP server before opening a page');
-    const project = await workspaceKey(caller.cwd, { signal, timeout: this.timeout });
-    const root = project ?? this.root(caller.thread);
+    const threadRoot = this.root(caller.thread);
+    let project;
+    let temporaryFolder;
+    let warning;
+    try { project = await workspaceKey(caller.cwd, { signal, timeout: this.timeout }); }
+    catch (error) {
+      if (!(error instanceof GitRootMismatch)) throw error;
+      temporaryFolder = error.folder;
+      warning = '警告: Git情報に不整合があるため、保存済みのログイン状態を使わず、一時環境で開きました。この環境でのログイン状態は、すべてのタブを閉じると失われます。';
+    }
+    // An uncertain folder must not reuse another temporary folder's login state.
+    const root = project ?? JSON.stringify([threadRoot, temporaryFolder ?? null]);
     const key = project ? `project:${project}` : headed;
     if (!this.config.chrome_path) {
       signal?.throwIfAborted();
@@ -165,7 +175,7 @@ export class BrowserManager {
         try { targetId = (await session.send('Target.getTargetInfo')).targetInfo.targetId; }
         finally { await session.detach(); }
         signal?.throwIfAborted();
-        if (!project && this.root(caller.thread) !== root) throw new Error('Caller parent changed while opening page');
+        if (!project && this.root(caller.thread) !== threadRoot) throw new Error('Caller parent changed while opening page');
         const record = { id, owner: caller.thread, connection: caller.connection, root, key, engine, group, targetId, page };
         record.controller = new PageController(page, () => this.dispose(record), this.timeout);
         group.pages.add(id);
@@ -186,11 +196,11 @@ export class BrowserManager {
     });
     try {
       await record.controller.run(() => this.perform(record, 'navigate_page', { url }), signal);
-      return { page_id: id };
+      return { page_id: id, ...(warning ? { warning } : {}) };
     } catch (error) {
       if (signal?.aborted) await record.controller.close();
       // A dialog is an interruption with a usable page, not a failed creation.
-      if (!record.controller.closed) error.message = `page_id: ${id}\n${error.message}`;
+      if (!record.controller.closed) error.message = `page_id: ${id}\n${warning ? warning + '\n' : ''}${error.message}`;
       throw error;
     }
   }

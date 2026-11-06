@@ -48,7 +48,7 @@ export function callerFromMeta(meta = {}, connection) {
 export function createMcp(manager, connection) {
   const server = new McpServer({ name: 'doze-bworser-mcp', version: '0.1.0' }, {
     capabilities: { experimental: { 'codex/sandbox-state': {} } },
-    instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. Close all project pages before switching headed mode. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Headed mode requires explicit joint viewing. Formal project capture/check CLIs take precedence.',
+    instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. Close all project pages before switching headed mode. If open_page includes a warning, tell the user. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Headed mode requires explicit joint viewing. Formal project capture/check CLIs take precedence.',
   });
   for (const [name, description, shape, readOnly = false] of definitions) {
     server.registerTool(name, { description, inputSchema: z.strictObject(shape),
@@ -59,6 +59,8 @@ export function createMcp(manager, connection) {
         manager.register(caller.thread, caller.parent);
         const value = await manager.call(caller, name, args, AbortSignal.any([ctx.mcpReq.signal, connection.signal]));
         if (name === 'take_screenshot') return { content: [{ type: 'image', data: value.image, mimeType: 'image/png' }] };
+        if (name === 'open_page') return { content: [{ type: 'text', text: JSON.stringify({ page_id: value.page_id }) },
+          ...(value.warning ? [{ type: 'text', text: value.warning }] : [])] };
         return { content: [{ type: 'text', text: name !== 'evaluate_script' && typeof value === 'string' ? value : JSON.stringify(value) }] };
       } catch (error) { return { isError: true, content: [{ type: 'text', text: String(error instanceof Error ? error.message : error) }] }; }
     });

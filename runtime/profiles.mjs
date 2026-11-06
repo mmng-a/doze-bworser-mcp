@@ -6,6 +6,14 @@ import { isAbsolute, join, dirname } from 'node:path';
 
 const run = promisify(execFile);
 
+/** Distinguish an inconsistent root from failures that must stop page creation. */
+export class GitRootMismatch extends Error {
+  constructor(folder) {
+    super('Git root mismatch: the nearest .git entry does not match the discovered root');
+    this.folder = folder;
+  }
+}
+
 /** Identify storage by its Git worktree root, or its canonical folder outside Git. */
 export async function workspaceKey(cwd, { signal, timeout = 20_000 } = {}) {
   if (cwd === undefined) return null;
@@ -32,6 +40,7 @@ export async function workspaceKey(cwd, { signal, timeout = 20_000 } = {}) {
       signal?.throwIfAborted();
       throw new Error(`Cannot determine Git root: ${error.stderr?.trim() || error.message}`, { cause: error });
     }
+    if (root !== directory) throw new GitRootMismatch(folder);
     break;
   }
   return createHash('sha256').update(JSON.stringify([root])).digest('hex');

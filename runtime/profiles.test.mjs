@@ -57,6 +57,9 @@ test('Git roots share storage while plain folders and separate worktrees retain 
   assert.notEqual(await workspaceKey(one), await workspaceKey(worktree));
   await mkdir(join(two, '.git'));
   await assert.rejects(workspaceKey(two), /Cannot determine Git root/);
+  git(['init', '--quiet', nested]);
+  await rm(join(nested, '.git', 'HEAD'));
+  await assert.rejects(workspaceKey(nested), /Git root mismatch/);
   if (process.platform !== 'win32') {
     const alias = join(directory, 'alias');
     await symlink(one, alias);
