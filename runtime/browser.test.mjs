@@ -5,6 +5,9 @@ import puppeteer from 'puppeteer-core';
 import { Connection } from './node_modules/puppeteer-core/lib/puppeteer/cdp/Connection.js';
 import { BrowserManager } from './browser.mjs';
 import { PendingDialog } from './controller.mjs';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -102,4 +105,57 @@ test('canceling the first browser download does not wait for it or launch a brow
   await tick();
   assert.equal(launches, 0);
   assert.equal(manager.pages.size, 0);
+});
+
+test('project tabs share a native profile and only switch display mode after all project tabs close', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'doze-project-browser-'));
+  const project = join(directory, 'project');
+  const otherProject = join(directory, 'other');
+  await Promise.all([mkdir(project), mkdir(otherProject)]);
+  const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 1 }, new Map(), join(directory, 'profiles'));
+  t.after(async () => { await manager.closeWhere(() => true); await rm(directory, { recursive: true, force: true }); });
+  const launches = [];
+  t.mock.method(puppeteer, 'launch', async options => {
+    launches.push(options);
+    const pages = [];
+    const browser = Object.assign(new EventEmitter(), {
+      defaultBrowserContext() { return { async newPage() {
+        let closed = false;
+        const page = Object.assign(new EventEmitter(), {
+          async emulateFocusedPage() {}, setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, async goto() {},
+          async createCDPSession() { return { async send() { return { targetInfo: { targetId: `target-${pages.length}` } }; }, async detach() {} }; },
+          async close() { closed = true; page.emit('close'); }, isClosed: () => closed,
+        });
+        pages.push(page);
+        return page;
+      } }; },
+      async createBrowserContext() { throw new Error('Project storage must use the native profile'); },
+      target() { return { async createCDPSession() { return {}; } }; },
+      async close() { await Promise.all(pages.filter(p => !p.isClosed()).map(p => p.close())); this.emit('disconnected'); },
+    });
+    return browser;
+  });
+  const one = { thread: 'one', workspaces: [project] };
+  const two = { thread: 'two', workspaces: [project] };
+  const other = { thread: 'other', workspaces: [otherProject] };
+  const first = await manager.call(one, 'open_page', { url: 'about:blank' });
+  const second = await manager.call(two, 'open_page', { url: 'about:blank' });
+  assert.equal(launches.length, 1);
+  await assert.rejects(manager.call(one, 'open_page', { url: 'about:blank', headed: true }), /Close all pages in this project/);
+  await assert.rejects(manager.call(two, 'close_page', first), /Page is closed/);
+  await manager.call(other, 'open_page', { url: 'about:blank', headed: true });
+  assert.equal(launches.length, 2, 'other projects can use a different mode concurrently');
+  await manager.call(one, 'close_page', first);
+  await assert.rejects(manager.call(one, 'open_page', { url: 'about:blank', headed: true }), /Close all pages/);
+  await manager.call(two, 'close_page', second);
+  const headed = await manager.call(one, 'open_page', { url: 'about:blank', headed: true });
+  assert.equal(launches[2].headless, false);
+  assert.equal(launches[0].headless, true);
+  assert.equal(launches[2].userDataDir, launches[0].userDataDir);
+  assert.notEqual(launches[1].userDataDir, launches[0].userDataDir);
+  assert.deepEqual(launches[0].args, ['--no-startup-window', '--restore-last-session']);
+  await manager.call(one, 'close_page', headed);
+  await manager.call(one, 'open_page', { url: 'about:blank' });
+  assert.equal(launches[3].headless, true);
+  assert.equal(launches[3].userDataDir, launches[0].userDataDir);
 });

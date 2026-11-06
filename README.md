@@ -11,11 +11,21 @@ A local MCP endpoint that shares a dedicated Chrome for Testing across Codex thr
 | Rust stdio launcher | Start or find the shared service, authenticate, forward bytes | One per MCP connection |
 | Shared Rust supervisor | Hold the OS file lock and wait for Node | One per running service |
 | Shared Node endpoint | Official MCP SDK, Puppeteer, ownership, queues, cancellation | Until the last connection closes, then a short cleanup delay |
-| Dedicated Chromium | Render and operate pages | First `open_page` through last page closure |
+| Dedicated Chromium per project | Render and operate pages with saved login state | The project's first `open_page` through last page closure |
 
 Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
 
-Normal headless pages share one browser globally per OS user. Explicit joint viewing uses one separate headed browser. Storage is isolated by root thread; each caller owns its own pages. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
+Each Codex workspace uses a dedicated browser and persistent profile. Threads in the same project share cookies and other storage; each caller owns its own pages. Normal operation is headless, while explicit joint viewing uses headed mode. Close all pages in a project before switching display modes. Different projects can run concurrently in different modes. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
+
+## Saved login state
+
+Workspace folders come automatically from Codex's `workspaces` metadata. Identity uses canonical local paths, not project names or Git remotes. Symlinks to the same folder share storage. Separate checkouts, worktrees and relocated folders use separate storage. When multiple folders are provided, their combination identifies one profile regardless of order.
+
+Profiles are stored under `~/.config/doze-bworser-mcp/profiles/<hash-of-workspace-paths>/`. Cookies, localStorage, IndexedDB and other profile data survive tab closure, operation timeouts, MCP disconnections and service restarts. Chrome's session restoration also retains session cookies. Previous tabs are not reopened and operations are not replayed. Site-side expiration or revocation still requires signing in again. Unsaved changes immediately before an unexpected process exit may be lost.
+
+Profiles contain authentication data: do not commit or publish them. On Unix, profile directories are accessible only to their owner. Sign out through the target site. To remove all saved project data, close every MCP connection, confirm the service has exited with `doze-bworser-mcp status`, then delete the `profiles` directory.
+
+Clients without workspace metadata retain temporary storage isolated by root thread, or by connection for non-Codex clients. This storage is not persisted.
 
 ## Installation
 
@@ -72,12 +82,12 @@ Use `inspect_page` before element operations. Only references from the latest co
 
 ## Operation and cleanup
 
-- Caller identity comes from Codex metadata, not model-supplied arguments. Available caller metadata identifies parent relationships. Non-Codex clients are isolated per connection. Disconnecting closes that connection's pages.
+- Caller identity and workspace folders come from Codex metadata, not model-supplied arguments. Sharing storage does not grant access to another thread's pages. Disconnecting closes that connection's pages.
 - Pages idle for 30 minutes close automatically, including pages waiting for a dialog. Active operations are bounded separately. Old page IDs are never reassigned; open a new page after closure.
 - Queue waiting and active execution each default to 20 seconds. Browser startup and target listing are bounded too. Dialog input does not inherit an independent CDP deadline. Queued canceled or expired calls do not execute. Active cancellation or timeout closes the uncertain page; external effects may already have happened. Calls are never retried automatically.
 - A dialog response does not release the page's operation slot. The original operation stays tracked, its execution deadline pauses during dialog input, and ordinary operations cannot overlap it. `handle_dialog` resumes and waits for it. A dialog during `open_page` reports the retained `page_id` in the error.
 - `close_page` interrupts active work. Cancellation before closure begins leaves the page alone; once begun, closure continues to completion. If page allocation cannot be canceled safely or page cleanup hangs, the affected dedicated browser is terminated, losing its other pages too.
-- Closing the last page stops the corresponding Chromium and removes its temporary profile. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
+- Closing a project's last page stops its Chromium and retains its profile. Temporary profiles for clients without workspace metadata are removed. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
 - A successful input operation is not proof that an external business action succeeded. Check the resulting page when necessary.
 
 ## Validation and CI
@@ -91,6 +101,6 @@ npm test --prefix runtime
 DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' cargo test --locked --test service
 ```
 
-Default tests check concurrent cold startup, SDK schemas, ownership metadata, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. The optional real-browser test uses a local fixture and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation.
+Default tests check concurrent cold startup, SDK schemas, ownership and workspace metadata, display-mode switching rules, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. Optional real-browser tests use local fixtures and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation, plus cookies, localStorage and IndexedDB shared across project threads, retained after tab closure, timeout and service restart, and cleared on logout.
 
 CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=ubuntu-latest`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The selected runner performs formatting, Clippy, Rust, Node and package checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.

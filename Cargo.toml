@@ -3,7 +3,7 @@ name = "doze-bworser-mcp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "One shared, lazily started Chromium for concurrent Codex browser tools."
+description = "Project-scoped persistent Chrome for concurrent Codex browser tools."
 license = "MIT"
 repository = "https://github.com/mmng-a/doze-bworser-mcp"
 

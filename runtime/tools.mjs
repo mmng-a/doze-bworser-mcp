@@ -5,7 +5,7 @@ const page_id = z.string().min(1);
 const element = z.string().min(1);
 const url = z.string().url().refine(value => value === 'about:blank' || ['http:', 'https:'].includes(new URL(value).protocol), 'Use HTTP(S) or about:blank');
 const definitions = [
-  ['open_page', 'Open your own page. headed is only for explicit joint viewing.', { url, headed: z.boolean().optional() }],
+  ['open_page', 'Open your own page with saved project storage. Close all project pages before switching headed mode. headed is only for explicit joint viewing.', { url, headed: z.boolean().optional() }],
   ['list_pages', 'List your own pages without starting Chromium.', {}, true],
   ['inspect_page', 'Read the accessibility tree as DevTools text. Use fresh uid references for click and fill.', { page_id }, true],
   ['navigate_page', 'Navigate your page and wait for DOM readiness.', { page_id, url }],
@@ -26,13 +26,18 @@ export function callerFromMeta(meta = {}, connection) {
   const thread = metadata.thread_id ?? meta.threadId ?? connection;
   let source = metadata.thread_source;
   if (typeof source === 'string' && source.trimStart().startsWith('{')) source = JSON.parse(source);
-  return { thread, parent: source?.subagent?.thread_spawn?.parent_thread_id, connection };
+  const workspaces = metadata.workspaces;
+  if (workspaces !== undefined && (!workspaces || typeof workspaces !== 'object' || Array.isArray(workspaces))) {
+    throw new Error('Invalid workspace metadata');
+  }
+  return { thread, parent: source?.subagent?.thread_spawn?.parent_thread_id, connection,
+    workspaces: Object.keys(workspaces ?? {}) };
 }
 
 /** Zod is the source for both tools/list schemas and runtime argument checks. */
 export function createMcp(manager, connection) {
   const server = new McpServer({ name: 'doze-bworser-mcp', version: '0.1.0' }, {
-    instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Headed mode requires explicit joint viewing. Formal project capture/check CLIs take precedence.',
+    instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. Close all project pages before switching headed mode. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Headed mode requires explicit joint viewing. Formal project capture/check CLIs take precedence.',
   });
   for (const [name, description, shape, readOnly = false] of definitions) {
     server.registerTool(name, { description, inputSchema: z.strictObject(shape),

@@ -44,7 +44,8 @@ class Client {
     return this;
   }
   call(name, args, thread = 'root', parent) {
-    const metadata = { thread_id: thread, thread_source: 'cli', ...(parent ? { thread_source: { subagent: { thread_spawn: { parent_thread_id: parent } } } } : {}) };
+    const metadata = { thread_id: thread, thread_source: 'cli', ...(this.workspace ? { workspaces: { [this.workspace]: {} } } : {}),
+      ...(parent ? { thread_source: { subagent: { thread_spawn: { parent_thread_id: parent } } } } : {}) };
     return this.request('tools/call', { name, arguments: args, _meta: { 'x-codex-turn-metadata': JSON.stringify(metadata) } });
   }
   async tool(name, args, thread, parent) {
@@ -80,7 +81,8 @@ async function fixture(t) {
     if (process.platform !== 'win32') rmSync(socket, { force: true });
   });
   return {
-    async client() { const c = new Client(path); clients.push(c); return c.initialize(); },
+    directory,
+    async client(workspace) { const c = new Client(path); c.workspace = workspace; clients.push(c); return c.initialize(); },
     status() { return JSON.parse(execFileSync(binary, ['--internal', 'status', path], { encoding: 'utf8' })); },
   };
 }
@@ -167,6 +169,93 @@ test('real Chromium: ownership, native input, dialogs, ordering, cancellation an
   await delay(150);
   assert.equal(f.status().pages, 0);
   assert.equal(f.status().browsers, 0);
+});
+
+test('real Chromium: project state survives tab closure, timeout, disconnect and service restart', { skip: !binary || !process.env.DOZE_BROWSER_CHROME, timeout: 90_000 }, async t => {
+  let logins = 0;
+  const server = createServer((req, res) => {
+    if (req.url === '/cookies') {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(req.headers.cookie ?? ''));
+      return;
+    }
+    if (req.url === '/login') {
+      logins++;
+      res.setHeader('Set-Cookie', ['session=fixture; HttpOnly; Path=/', 'persistent=fixture; Max-Age=3600; HttpOnly; Path=/']);
+    }
+    if (req.url === '/logout') res.setHeader('Set-Cookie', ['session=; Max-Age=0; Path=/', 'persistent=; Max-Age=0; Path=/']);
+    res.end('<title>Project storage</title>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const f = await fixture(t);
+  const project = join(f.directory, 'project');
+  const otherProject = join(f.directory, 'other');
+  mkdirSync(project);
+  mkdirSync(otherProject);
+  const [one, two, other] = await Promise.all([f.client(project), f.client(project), f.client(otherProject)]);
+  const page = value(await one.tool('open_page', { url: url + '/login' }, 'first')).page_id;
+  const read = `async () => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('fixture', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('state');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const stored = await new Promise((resolve, reject) => {
+      const request = db.transaction('state').objectStore('state').get('login');
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return { cookies: await fetch('/cookies').then(r => r.json()), local: localStorage.getItem('login'), stored };
+  }`;
+  await one.tool('evaluate_script', { page_id: page, expression: `(async () => {
+    localStorage.setItem('login', 'fixture');
+    const request = indexedDB.open('fixture', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('state');
+    const db = await new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction('state', 'readwrite');
+      transaction.objectStore('state').put({ authenticated: true }, 'login');
+      transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error);
+    });
+    db.close(); return 'OK';
+  })()` }, 'first');
+  const expected = { cookies: 'session=fixture; persistent=fixture', local: 'fixture', stored: { authenticated: true } };
+  const check = async (client, id, thread, wanted = expected) => assert.deepEqual(value(await client.tool('evaluate_script', { page_id: id, expression: `(${read})()` }, thread)), wanted);
+  const shared = value(await two.tool('open_page', { url }, 'second')).page_id;
+  await check(two, shared, 'second');
+  assert.equal((await two.call('inspect_page', { page_id: page }, 'second').promise).result.isError, true);
+  const isolated = value(await other.tool('open_page', { url }, 'third')).page_id;
+  await check(other, isolated, 'third', { cookies: '', local: null, stored: null });
+  assert.equal(f.status().browsers, 2);
+  await one.tool('close_page', { page_id: page }, 'first');
+  await two.tool('close_page', { page_id: shared }, 'second');
+  const restored = value(await one.tool('open_page', { url }, 'new-thread')).page_id;
+  await check(one, restored, 'new-thread');
+  const timedOut = await one.call('evaluate_script', { page_id: restored, expression: 'new Promise(() => {})' }, 'new-thread').promise;
+  assert.equal(timedOut.result.isError, true);
+  assert.match(text(timedOut.result), /timed out/);
+  const afterTimeout = value(await two.tool('open_page', { url }, 'after-timeout')).page_id;
+  await check(two, afterTimeout, 'after-timeout');
+  await Promise.all([one.close(), two.close(), other.close()]);
+  await delay(3400);
+  const restarted = await f.client(project);
+  const afterRestart = value(await restarted.tool('open_page', { url }, 'after-restart')).page_id;
+  await check(restarted, afterRestart, 'after-restart');
+  assert.equal(logins, 1, 'reopening must not restore or revisit a previous login tab');
+  await restarted.tool('evaluate_script', { page_id: afterRestart, expression: `fetch('/logout').then(() => {
+    localStorage.clear();
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase('fixture');
+      request.onsuccess = () => resolve('OK'); request.onerror = () => reject(request.error);
+    });
+  })` }, 'after-restart');
+  await restarted.tool('close_page', { page_id: afterRestart }, 'after-restart');
+  const loggedOut = value(await restarted.tool('open_page', { url }, 'logged-out')).page_id;
+  await check(restarted, loggedOut, 'logged-out', { cookies: '', local: null, stored: null });
 });
 
 test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip: !binary }, async t => {

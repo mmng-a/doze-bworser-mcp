@@ -12,7 +12,7 @@ const parentsPath = join(dirname(configPath), 'parents.json');
 let savedParents = {};
 try { savedParents = JSON.parse(readFileSync(parentsPath, 'utf8')); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
-const manager = new BrowserManager(config, new Map(Object.entries(savedParents)));
+const manager = new BrowserManager(config, new Map(Object.entries(savedParents)), join(dirname(configPath), 'profiles'));
 const clients = new Map();
 const sockets = new Set();
 let closing = false;
