@@ -15,17 +15,24 @@ A local MCP endpoint that shares a dedicated Chrome for Testing across Codex thr
 
 Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
 
-Each Codex workspace uses a dedicated browser and persistent profile. Threads in the same project share cookies and other storage; each caller owns its own pages. Normal operation is headless, while explicit joint viewing uses headed mode. Close all pages in a project before switching display modes. Different projects can run concurrently in different modes. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
+Each Git worktree root, or working folder outside Git, uses a dedicated browser and persistent profile. Threads using the same storage share cookies and other data; each caller owns its own pages. Normal operation is headless, while explicit joint viewing uses headed mode. Close all pages sharing that storage before switching display modes. Different storage locations can run concurrently in different modes. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
 
 ## Saved login state
 
-Workspace folders come automatically from Codex's `workspaces` metadata. Identity uses canonical local paths, not project names or Git remotes. Symlinks to the same folder share storage. Separate checkouts, worktrees and relocated folders use separate storage. When multiple folders are provided, their combination identifies one profile regardless of order.
+Working folders come automatically from `sandboxCwd` in Codex's experimental `codex/sandbox-state` request metadata. Git enrichment in `workspaces` is not used.
 
-Profiles are stored under `~/.config/doze-bworser-mcp/profiles/<hash-of-workspace-paths>/`. Cookies, localStorage, IndexedDB and other profile data survive tab closure, operation timeouts, MCP disconnections and service restarts. Chrome's session restoration also retains session cookies. Previous tabs are not reopened and operations are not replayed. Site-side expiration or revocation still requires signing in again. Unsaved changes immediately before an unexpected process exit may be lost.
+| Working folder | Storage identity |
+| --- | --- |
+| Inside Git | The worktree root, shared across subfolders and Codex projects using that root |
+| Outside Git | The canonical working folder, persisted independently for each folder |
+
+Symlinks to the same folder share storage. Separate checkouts and worktrees use separate storage. Git-managed folders require the Git executable. Broken Git metadata or a failed Git invocation returns an error instead of switching storage locations. Folders outside Git do not invoke Git.
+
+Profiles are stored under `~/.config/doze-bworser-mcp/profiles/<hash-of-git-root-or-working-folder>/`. Cookies, localStorage, IndexedDB and other profile data survive tab closure, operation timeouts, MCP disconnections and service restarts. Chrome's session restoration also retains session cookies. Previous tabs are not reopened and operations are not replayed. Site-side expiration or revocation still requires signing in again. Unsaved changes immediately before an unexpected process exit may be lost.
 
 Profiles contain authentication data: do not commit or publish them. On Unix, profile directories are accessible only to their owner. Sign out through the target site. To remove all saved project data, close every MCP connection, confirm the service has exited with `doze-bworser-mcp status`, then delete the `profiles` directory.
 
-Clients without workspace metadata retain temporary storage isolated by root thread, or by connection for non-Codex clients. This storage is not persisted.
+When Codex does not supply `sandboxCwd`, `open_page` returns an error. Update to a supported Codex version and reconnect this MCP server. Non-Codex clients without working-folder metadata retain temporary storage isolated per connection; this storage is not persisted.
 
 ## Installation
 
@@ -87,7 +94,7 @@ Use `inspect_page` before element operations. Only references from the latest co
 - Queue waiting and active execution each default to 20 seconds. Browser startup and target listing are bounded too. Dialog input does not inherit an independent CDP deadline. Queued canceled or expired calls do not execute. Active cancellation or timeout closes the uncertain page; external effects may already have happened. Calls are never retried automatically.
 - A dialog response does not release the page's operation slot. The original operation stays tracked, its execution deadline pauses during dialog input, and ordinary operations cannot overlap it. `handle_dialog` resumes and waits for it. A dialog during `open_page` reports the retained `page_id` in the error.
 - `close_page` interrupts active work. Cancellation before closure begins leaves the page alone; once begun, closure continues to completion. If page allocation cannot be canceled safely or page cleanup hangs, the affected dedicated browser is terminated, losing its other pages too.
-- Closing a project's last page stops its Chromium and retains its profile. Temporary profiles for clients without workspace metadata are removed. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
+- Closing a project's last page stops its Chromium and retains its profile. Temporary profiles used by non-Codex clients are removed. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
 - A successful input operation is not proof that an external business action succeeded. Check the resulting page when necessary.
 
 ## Validation and CI

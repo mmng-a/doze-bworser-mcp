@@ -1,13 +1,40 @@
 import { createHash } from 'node:crypto';
-import { mkdir, chmod, realpath } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdir, chmod, realpath, lstat } from 'node:fs/promises';
+import { isAbsolute, join, dirname } from 'node:path';
 
-/** Identify a workspace by its canonical local paths, never its Git remote or display name. */
-export async function workspaceKey(paths = []) {
-  if (!paths.length) return null;
-  if (paths.some(path => typeof path !== 'string' || !isAbsolute(path))) throw new Error('Workspace paths must be absolute');
-  const canonical = [...new Set(await Promise.all(paths.map(path => realpath(path))))].sort();
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+const run = promisify(execFile);
+
+/** Identify storage by its Git worktree root, or its canonical folder outside Git. */
+export async function workspaceKey(cwd, { signal, timeout = 20_000 } = {}) {
+  if (cwd === undefined) return null;
+  if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw new Error('Workspace path must be absolute');
+  signal?.throwIfAborted();
+  const folder = await realpath(cwd);
+  let root = folder;
+  for (let directory = folder; ; directory = dirname(directory)) {
+    signal?.throwIfAborted();
+    try { await lstat(join(directory, '.git')); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      if (dirname(directory) === directory) break;
+      continue;
+    }
+    try {
+      // Inherited Git overrides must not redirect another project's storage.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
+      const { stdout } = await run('git', ['-C', folder, 'rev-parse', '--show-toplevel'], { env, signal, timeout, maxBuffer: 64 * 1024 });
+      const path = stdout.replace(/\r?\n$/, '');
+      if (!isAbsolute(path)) throw new Error('Git returned an invalid worktree root');
+      root = await realpath(path);
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw new Error(`Cannot determine Git root: ${error.stderr?.trim() || error.message}`, { cause: error });
+    }
+    break;
+  }
+  return createHash('sha256').update(JSON.stringify([root])).digest('hex');
 }
 
 /** Keep browser credentials outside the checkout and inaccessible to other OS users. */

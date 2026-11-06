@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
+import { fileURLToPath } from 'node:url';
 
 const page_id = z.string().min(1);
 const element = z.string().min(1);
@@ -26,17 +27,27 @@ export function callerFromMeta(meta = {}, connection) {
   const thread = metadata.thread_id ?? meta.threadId ?? connection;
   let source = metadata.thread_source;
   if (typeof source === 'string' && source.trimStart().startsWith('{')) source = JSON.parse(source);
-  const workspaces = metadata.workspaces;
-  if (workspaces !== undefined && (!workspaces || typeof workspaces !== 'object' || Array.isArray(workspaces))) {
-    throw new Error('Invalid workspace metadata');
+  const state = meta['codex/sandbox-state'];
+  let cwd;
+  if (state !== undefined) {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Invalid sandboxCwd metadata');
+    if (state.sandboxCwd !== undefined) {
+      try {
+        if (typeof state.sandboxCwd !== 'string' || !state.sandboxCwd.startsWith('file://')) throw new Error();
+        const uri = new URL(state.sandboxCwd);
+        if (uri.search || uri.hash) throw new Error();
+        cwd = fileURLToPath(uri);
+      } catch { throw new Error('sandboxCwd must be an absolute file URL for this host'); }
+    }
   }
   return { thread, parent: source?.subagent?.thread_spawn?.parent_thread_id, connection,
-    workspaces: Object.keys(workspaces ?? {}) };
+    cwd, codex: meta['x-codex-turn-metadata'] !== undefined || meta.threadId !== undefined };
 }
 
 /** Zod is the source for both tools/list schemas and runtime argument checks. */
 export function createMcp(manager, connection) {
   const server = new McpServer({ name: 'doze-bworser-mcp', version: '0.1.0' }, {
+    capabilities: { experimental: { 'codex/sandbox-state': {} } },
     instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. Close all project pages before switching headed mode. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Headed mode requires explicit joint viewing. Formal project capture/check CLIs take precedence.',
   });
   for (const [name, description, shape, readOnly = false] of definitions) {

@@ -135,9 +135,9 @@ test('project tabs share a native profile and only switch display mode after all
     });
     return browser;
   });
-  const one = { thread: 'one', workspaces: [project] };
-  const two = { thread: 'two', workspaces: [project] };
-  const other = { thread: 'other', workspaces: [otherProject] };
+  const one = { thread: 'one', cwd: project };
+  const two = { thread: 'two', cwd: project };
+  const other = { thread: 'other', cwd: otherProject };
   const first = await manager.call(one, 'open_page', { url: 'about:blank' });
   const second = await manager.call(two, 'open_page', { url: 'about:blank' });
   assert.equal(launches.length, 1);

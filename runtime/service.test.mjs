@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createIpcServer } from 'node:net';
@@ -20,6 +20,7 @@ class Client {
     this.pending = new Map();
     this.next = 1;
     this.errors = '';
+    this.cwd = process.cwd();
     this.child.stderr.on('data', b => { this.errors += b; });
     this.exit = new Promise(resolve => this.child.once('exit', resolve));
     createInterface({ input: this.child.stdout }).on('line', line => {
@@ -40,13 +41,15 @@ class Client {
   async initialize() {
     const response = await this.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'integration', version: '1' } }).promise;
     assert.ok(response.result?.capabilities.tools, JSON.stringify(response));
+    assert.ok(response.result.capabilities.experimental?.['codex/sandbox-state']);
     this.send({ method: 'notifications/initialized' });
     return this;
   }
   call(name, args, thread = 'root', parent) {
-    const metadata = { thread_id: thread, thread_source: 'cli', ...(this.workspace ? { workspaces: { [this.workspace]: {} } } : {}),
+    const metadata = { thread_id: thread, thread_source: 'cli',
       ...(parent ? { thread_source: { subagent: { thread_spawn: { parent_thread_id: parent } } } } : {}) };
-    return this.request('tools/call', { name, arguments: args, _meta: { 'x-codex-turn-metadata': JSON.stringify(metadata) } });
+    return this.request('tools/call', { name, arguments: args, _meta: { 'x-codex-turn-metadata': JSON.stringify(metadata),
+      'codex/sandbox-state': { sandboxCwd: pathToFileURL(this.cwd).href } } });
   }
   async tool(name, args, thread, parent) {
     const response = await this.call(name, args, thread, parent).promise;
@@ -82,7 +85,7 @@ async function fixture(t) {
   });
   return {
     directory,
-    async client(workspace) { const c = new Client(path); c.workspace = workspace; clients.push(c); return c.initialize(); },
+    async client(cwd = directory) { const c = new Client(path); c.cwd = cwd; clients.push(c); return c.initialize(); },
     status() { return JSON.parse(execFileSync(binary, ['--internal', 'status', path], { encoding: 'utf8' })); },
   };
 }
@@ -97,6 +100,10 @@ test('concurrent stdio launchers share one cold Node endpoint and SDK schemas', 
   const invalid = await two.call('handle_dialog', { page_id: 'missing', accept: 'false' }).promise;
   assert.ok(invalid.error || invalid.result?.isError);
   assert.equal(text(await three.tool('list_pages', {})), '[]');
+  const missingCwd = await three.request('tools/call', { name: 'open_page', arguments: { url: 'about:blank' },
+    _meta: { 'x-codex-turn-metadata': { thread_id: 'root' } } }).promise;
+  assert.equal(missingCwd.result.isError, true);
+  assert.match(text(missingCwd.result), /sandboxCwd/);
   await one.close();
   await delay(50);
   assert.equal(f.status().connections, 2);
@@ -109,18 +116,23 @@ test('real Chromium: ownership, native input, dialogs, ordering, cancellation an
   t.after(() => server.close());
   const url = `http://127.0.0.1:${server.address().port}/`;
   const f = await fixture(t);
-  const [one, two] = await Promise.all([f.client(), f.client()]);
+  const firstFolder = join(f.directory, 'first');
+  const secondFolder = join(f.directory, 'second');
+  mkdirSync(firstFolder);
+  mkdirSync(secondFolder);
+  const [one, two] = await Promise.all([f.client(firstFolder), f.client(secondFolder)]);
   const [a, b] = await Promise.all([one.tool('open_page', { url }, 'one'), two.tool('open_page', { url }, 'two')]);
   const page = value(a).page_id;
   const other = value(b).page_id;
-  assert.deepEqual(f.status(), { connections: 2, pages: 2, browsers: 1 });
+  assert.deepEqual(f.status(), { connections: 2, pages: 2, browsers: 2 });
   assert.equal(value(await one.tool('evaluate_script', { page_id: page, expression: "localStorage.setItem('owner','one'); 'OK'" }, 'one')), 'OK');
   assert.equal(value(await two.tool('evaluate_script', { page_id: other, expression: "localStorage.getItem('owner')" }, 'two')), null);
   assert.equal((await two.call('inspect_page', { page_id: page }, 'two').promise).result.isError, true);
-  const child = value(await two.tool('open_page', { url }, 'child', 'one')).page_id;
-  assert.equal(value(await two.tool('evaluate_script', { page_id: child, expression: "localStorage.getItem('owner')" }, 'child')), 'one');
-  assert.equal(value(await two.tool('list_pages', {}, 'child')).length, 1);
-  await two.tool('close_page', { page_id: child }, 'child');
+  const childClient = await f.client(firstFolder);
+  const child = value(await childClient.tool('open_page', { url }, 'child', 'one')).page_id;
+  assert.equal(value(await childClient.tool('evaluate_script', { page_id: child, expression: "localStorage.getItem('owner')" }, 'child')), 'one');
+  assert.equal(value(await childClient.tool('list_pages', {}, 'child')).length, 1);
+  await childClient.tool('close_page', { page_id: child }, 'child');
   const snapshot = text(await one.tool('inspect_page', { page_id: page }, 'one'));
   assert.match(snapshot, /RootWebArea "Browser contract"/);
   const input = snapshot.match(/uid=(\S+) textbox "Name"/)[1];
@@ -256,6 +268,16 @@ test('real Chromium: project state survives tab closure, timeout, disconnect and
   await restarted.tool('close_page', { page_id: afterRestart }, 'after-restart');
   const loggedOut = value(await restarted.tool('open_page', { url }, 'logged-out')).page_id;
   await check(restarted, loggedOut, 'logged-out', { cookies: '', local: null, stored: null });
+  const repo = join(f.directory, 'repository');
+  const inside = join(repo, 'nested');
+  mkdirSync(inside, { recursive: true });
+  execFileSync('git', ['init', '--quiet', repo]);
+  const [rootClient, nestedClient] = await Promise.all([f.client(repo), f.client(inside)]);
+  const rootPage = value(await rootClient.tool('open_page', { url }, 'repo-root')).page_id;
+  await rootClient.tool('evaluate_script', { page_id: rootPage, expression: "localStorage.setItem('login', 'same-repository')" }, 'repo-root');
+  const nestedPage = value(await nestedClient.tool('open_page', { url }, 'repo-nested')).page_id;
+  assert.equal(value(await nestedClient.tool('evaluate_script', { page_id: nestedPage, expression: "localStorage.getItem('login')" }, 'repo-nested')), 'same-repository');
+  assert.equal(f.status().browsers, 2, 'the plain folder and Git root use one browser each');
 });
 
 test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip: !binary }, async t => {

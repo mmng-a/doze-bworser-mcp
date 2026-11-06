@@ -83,7 +83,8 @@ export class BrowserManager {
   async open(caller, url, headed, signal) {
     validateUrl(url);
     const id = randomUUID();
-    const project = await workspaceKey(caller.workspaces);
+    if (caller.codex && !caller.cwd) throw new Error('Codex did not provide sandboxCwd. Update Codex and reconnect the MCP server before opening a page');
+    const project = await workspaceKey(caller.cwd, { signal, timeout: this.timeout });
     const root = project ?? this.root(caller.thread);
     const key = project ? `project:${project}` : headed;
     if (!this.config.chrome_path) {
