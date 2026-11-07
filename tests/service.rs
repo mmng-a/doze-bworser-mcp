@@ -5,6 +5,7 @@ fn shared_stdio_endpoint() {
     let status = Command::new("node")
         .args([
             "--test",
+            "--test-concurrency=1",
             "runtime/service.test.mjs",
             "runtime/viewer.test.mjs",
         ])

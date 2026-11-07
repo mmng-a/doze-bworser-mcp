@@ -133,3 +133,19 @@ test('real viewer: initial navigation dialog retains the page and is handled wit
   await manager.call(caller, 'handle_dialog', { page_id: record.id, accept: true });
   assert.deepEqual(await record.page.evaluate(() => [window.started, window.finished]), [1, true]);
 });
+
+test('real browser: native profile keeps session and persistent cookies after immediate last-page closure', { skip: !enabled, timeout: 45_000 }, async t => {
+  const { manager, caller, url } = await setup(t);
+  const first = await manager.call(caller, 'open_page', { url });
+  const record = manager.pages.get(first.page_id);
+  const process = record.engine.browser.process();
+  await record.page.evaluate(() => {
+    document.cookie = 'session=saved; path=/';
+    document.cookie = 'persistent=saved; Max-Age=3600; path=/';
+  });
+  const started = Date.now();
+  await manager.call(caller, 'close_page', first);
+  t.diagnostic(JSON.stringify({ closeMilliseconds: Date.now() - started, exitCode: process.exitCode, signalCode: process.signalCode }));
+  const second = await manager.call(caller, 'open_page', { url });
+  assert.equal(await manager.pages.get(second.page_id).page.evaluate(() => document.cookie), 'session=saved; persistent=saved');
+});

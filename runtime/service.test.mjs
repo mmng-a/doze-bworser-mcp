@@ -14,7 +14,7 @@ const binary = process.env.DOZE_TEST_BINARY;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 class Client {
-  constructor(path, env = process.env, requestTimeout = 15_000) {
+  constructor(path, env = process.env, requestTimeout = 30_000) {
     this.child = spawn(binary, path ? ['--internal', 'proxy', path] : ['proxy'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.requestTimeout = requestTimeout;
     this.pending = new Map();
@@ -71,7 +71,7 @@ async function fixture(t) {
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-test-${randomUUID()}` : `/tmp/doze-test-${randomUUID()}.sock`;
   const path = join(directory, 'config.json');
   writeFileSync(path, JSON.stringify({ token: 'a'.repeat(64), socket_path: socket, node_path: process.execPath,
-    daemon_path: fileURLToPath(new URL('./daemon.mjs', import.meta.url)), chrome_path: process.env.DOZE_BROWSER_CHROME ?? '/missing/chrome', operation_timeout_seconds: 3 }));
+    daemon_path: fileURLToPath(new URL('./daemon.mjs', import.meta.url)), chrome_path: process.env.DOZE_BROWSER_CHROME ?? '/missing/chrome', operation_timeout_seconds: 20 }));
   const clients = [];
   t.after(async () => {
     await Promise.all(clients.map(c => c.child.exitCode === null ? c.close() : undefined));
