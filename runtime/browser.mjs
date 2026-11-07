@@ -293,8 +293,10 @@ export class BrowserManager {
         if (group.pages.size === 1 && !engine.persistent) await group.context.close();
         else if (!page.isClosed()) await page.close();
       } catch (error) {
-        engine.browser.process()?.kill('SIGKILL');
-        throw error;
+        if (engine.browser.connected !== false) {
+          engine.browser.process()?.kill('SIGKILL');
+          throw error;
+        }
       } finally {
         group.pages.delete(id);
         if (!group.pages.size) engine.groups.delete(record.root);
