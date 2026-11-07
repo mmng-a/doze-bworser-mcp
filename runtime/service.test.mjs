@@ -66,6 +66,18 @@ class Client {
 const text = result => result.content[0].text;
 const value = result => JSON.parse(text(result));
 
+async function waitForShutdown(path, env = process.env) {
+  const deadline = Date.now() + 12_000;
+  do {
+    // A status connection restarts the three-second idle grace; frequent polling prevents exit.
+    await delay(3400);
+    const result = spawnSync(binary, path ? ['--internal', 'status', path] : ['status'], { env, timeout: 3000 });
+    if (result.error) throw result.error;
+    if (result.status !== 0) return;
+  } while (Date.now() < deadline);
+  assert.fail('last disconnect must stop the shared endpoint after browser cleanup and idle grace');
+}
+
 async function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'doze-test-'));
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-test-${randomUUID()}` : `/tmp/doze-test-${randomUUID()}.sock`;
@@ -76,8 +88,7 @@ async function fixture(t) {
   t.after(async () => {
     await Promise.all(clients.map(c => c.child.exitCode === null ? c.close() : undefined));
     // Node exits on its own after its last MCP connection closes.
-    await delay(3400);
-    assert.notEqual(spawnSync(binary, ['--internal', 'status', path]).status, 0, 'last disconnect must stop the shared endpoint');
+    await waitForShutdown(path);
     const logs = readFileSync(join(directory, 'service.log'), 'utf8');
     if (logs.trim()) t.diagnostic(logs.slice(-5000));
     rmSync(directory, { recursive: true, force: true });
@@ -85,6 +96,7 @@ async function fixture(t) {
   });
   return {
     directory,
+    shutdown() { return waitForShutdown(path); },
     async client(cwd = directory) { const c = new Client(path); c.cwd = cwd; clients.push(c); return c.initialize(); },
     status() { return JSON.parse(execFileSync(binary, ['--internal', 'status', path], { encoding: 'utf8' })); },
   };
@@ -253,7 +265,7 @@ test('real Chromium: project state survives tab closure, timeout, disconnect and
   const afterTimeout = value(await two.tool('open_page', { url }, 'after-timeout')).page_id;
   await check(two, afterTimeout, 'after-timeout');
   await Promise.all([one.close(), two.close(), other.close()]);
-  await delay(3400);
+  await f.shutdown();
   const restarted = await f.client(project);
   const afterRestart = value(await restarted.tool('open_page', { url }, 'after-restart')).page_id;
   await check(restarted, afterRestart, 'after-restart');
@@ -429,7 +441,7 @@ test('plain stdio registration prepares one private endpoint without client conf
     assert.equal(spawnSync(process.execPath, ['-e', 'require("fs").accessSync(process.argv[1])', join(directory, '.codex')]).status, 1);
   } finally {
     await Promise.all(clients.map(client => client.close()));
-    await delay(3400);
+    await waitForShutdown(undefined, env);
     rmSync(directory, { recursive: true, force: true });
     if (config && process.platform !== 'win32') rmSync(config.socket_path.slice(0, config.socket_path.lastIndexOf('/')), { recursive: true, force: true });
   }
@@ -456,7 +468,7 @@ test('first browser use downloads its own Chrome without a separate installer', 
     assert.equal(spawnSync(process.execPath, ['-e', 'require("fs").accessSync(process.argv[1])', join(directory, '.codex')]).status, 1);
   } finally {
     await client.close();
-    await delay(3400);
+    await waitForShutdown(undefined, env);
     rmSync(directory, { recursive: true, force: true });
     if (config && process.platform !== 'win32') rmSync(config.socket_path.slice(0, config.socket_path.lastIndexOf('/')), { recursive: true, force: true });
   }

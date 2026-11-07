@@ -51,7 +51,8 @@ async function clickInView(view, selector) {
     const [{ metadata }] = await frame;
     const point = await view.record.page.$eval(selector, e => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
     const canvas = await view.front.evaluate(canvasBounds);
-    await view.front.mouse.click(canvas.x + point.x * canvas.width / metadata.deviceWidth, canvas.y + point.y * canvas.height / metadata.deviceHeight);
+    await view.front.mouse.click(canvas.x + point.x * canvas.width / metadata.deviceWidth,
+      canvas.y + (point.y + metadata.offsetTop) * canvas.height / metadata.deviceHeight);
   } finally { await session.send('Page.stopScreencast'); await session.detach(); }
 }
 
@@ -59,6 +60,7 @@ test('real viewer: shared page, address bar, input, parallel pages and independe
   const { manager, caller, url } = await setup(t);
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);
+  record.page.setDefaultTimeout(5000);
   const backend = record.engine.browser;
   await record.page.evaluate(() => { document.cookie = 'login=shared; path=/'; localStorage.setItem('state', 'saved'); });
   await manager.call(caller, 'show_page', first);
@@ -87,6 +89,7 @@ test('real viewer: shared page, address bar, input, parallel pages and independe
   await record.page.waitForFunction(() => location.pathname === '/next');
   assert.equal(await record.page.evaluate(() => localStorage.getItem('state')), 'saved');
   await clickInView(view, 'input');
+  await record.page.waitForFunction(() => document.activeElement === document.querySelector('input'));
   await view.front.keyboard.type('human input');
   await record.page.waitForFunction(() => document.querySelector('input').value === 'human input');
   await clickInView(view, 'button');
