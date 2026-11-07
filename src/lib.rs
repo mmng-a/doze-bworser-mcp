@@ -90,13 +90,24 @@ pub fn local_config() -> Result<(PathBuf, Config)> {
     };
     #[cfg(windows)]
     let socket_path = PathBuf::from(format!(r"\\.\pipe\doze-bworser-{}", &token[..24]));
+    let runtime = std::env::var_os("DOZE_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("DOZE_RUNTIME_DIR").map(PathBuf::from));
+    #[cfg(debug_assertions)]
     let runtime =
-        option_env!("DOZE_RUNTIME_DIR").unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/runtime"));
+        runtime.or_else(|| Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime")));
+    let runtime =
+        runtime.context("Node runtime location is missing; use the Homebrew or npm launcher")?;
+    if !runtime.is_absolute() {
+        bail!("Node runtime location must be absolute");
+    }
     let config = Config {
         token,
         socket_path,
-        node_path: option_env!("DOZE_NODE_PATH").unwrap_or("node").into(),
-        daemon_path: PathBuf::from(runtime).join("daemon.mjs"),
+        node_path: std::env::var_os("DOZE_NODE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| option_env!("DOZE_NODE_PATH").unwrap_or("node").into()),
+        daemon_path: runtime.join("daemon.mjs"),
         chrome_path: PathBuf::new(),
         operation_timeout_seconds: default_timeout(),
     };

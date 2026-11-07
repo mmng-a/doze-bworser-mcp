@@ -1,0 +1,41 @@
+name: Prepare npm packages
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            key: darwin-arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            key: darwin-x64
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            key: win32-x64
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            key: linux-x64
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: runtime/package-lock.json
+      - run: npm run package:npm -- ${{ matrix.target }}
+      - run: npm run test:npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.key }}
+          path: dist/npm/${{ matrix.key }}/*.tgz
+          if-no-files-found: error

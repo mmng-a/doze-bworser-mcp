@@ -1,0 +1,10 @@
+{
+  "name": "doze-bworser-mcp-packaging",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "package:npm": "node npm/package.mjs",
+    "test:npm": "node npm/smoke.mjs"
+  }
+}

@@ -67,9 +67,13 @@ Homebrew is available on macOS and Linux. Windows and source builds require Rust
 
 ```sh
 npm ci --ignore-scripts --prefix runtime
-cargo build --release --locked
+DOZE_RUNTIME_DIR="$PWD/runtime" cargo build --release --locked
 codex mcp add doze-bworser-mcp -- /absolute/path/to/target/release/doze-bworser-mcp
 ```
+
+Source builds must explicitly select the runtime using `DOZE_RUNTIME_DIR` as above. Homebrew and npm archives set it automatically. In Windows PowerShell, set `$env:DOZE_RUNTIME_DIR = (Resolve-Path runtime).Path`, then run `cargo build --release --locked`.
+
+npm distribution is prepared but not published to the npm registry. See [npm/README.md](https://github.com/mmng-a/doze-bworser-mcp/blob/main/npm/README.md) for targets and validation steps.
 
 MCP does not remove OS restrictions or tool approval requirements. Hosts that sandbox MCP processes must permit local IPC and browser downloading and startup.
 
@@ -119,4 +123,4 @@ DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' DOZE_TEST_VIEWER=1 carg
 
 Default tests check concurrent cold startup, SDK schemas, ownership and workspace metadata, shared headless pages and views, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. Optional real-browser tests use local fixtures and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation, plus cookies, localStorage and IndexedDB shared across project threads, retained after tab closure, timeout and service restart, and cleared on logout. Add `DOZE_TEST_VIEWER=1` to verify the address bar, clicks, ASCII input, parallel pages, view closure/crash and cancellation. These tests require a graphical environment.
 
-CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=windows-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. Choose `light` for the default suite or `browser` to also download pinned Chrome and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
+CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=windows-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The separate manual `npm-packages.yml` workflow builds and checks npm archives for four OS/CPU combinations without publishing them. Choose `light` for the default suite or `browser` to also download pinned Chrome and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.

@@ -47,7 +47,7 @@ export function callerFromMeta(meta = {}, connection) {
 
 /** Zod is the source for both tools/list schemas and runtime argument checks. */
 export function createMcp(manager, connection) {
-  const server = new McpServer({ name: 'doze-bworser-mcp', version: '0.1.0' }, {
+  const server = new McpServer({ name: 'doze-bworser-mcp', version: '0.2.0' }, {
     capabilities: { experimental: { 'codex/sandbox-state': {} } },
     instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. headed and show_page open a DevTools live view of the same headless page and require explicit joint viewing. Take turns with the user on the viewed page. Closing the view keeps the page open. DevTools has limitations with Japanese input and does not automatically switch to popups. If open_page includes a warning, tell the user. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Formal project capture/check CLIs take precedence.',
   });

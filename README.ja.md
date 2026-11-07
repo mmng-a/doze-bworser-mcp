@@ -67,9 +67,13 @@ macOSとLinuxではHomebrewを利用できます。Windowsやソースからの�
 
 ```sh
 npm ci --ignore-scripts --prefix runtime
-cargo build --release --locked
+DOZE_RUNTIME_DIR="$PWD/runtime" cargo build --release --locked
 codex mcp add doze-bworser-mcp -- /absolute/path/to/target/release/doze-bworser-mcp
 ```
+
+ソースからのビルドでは、上記の `DOZE_RUNTIME_DIR` で実行部の場所を明示します。Homebrew版とnpm配布物は自動で指定します。WindowsのPowerShellでビルドする場合は、先に `$env:DOZE_RUNTIME_DIR = (Resolve-Path runtime).Path` を設定し、`cargo build --release --locked` を実行してください。
+
+npm配布物は準備段階で、まだnpmレジストリへ公開していません。配布対象と検証手順は [npm/README.md](https://github.com/mmng-a/doze-bworser-mcp/blob/main/npm/README.md) に記載しています。
 
 MCPにしてもOSの制限やツールの承認はなくなりません。MCPプロセス自体を制限するホストでは、ローカルIPC、ブラウザのダウンロード・起動への許可が必要です。
 
@@ -119,4 +123,4 @@ DOZE_BROWSER_CHROME='/専用のChrome実行ファイルの絶対パス' DOZE_TES
 
 通常のテストではChromeを起動せず、並行した初回起動、SDKのスキーマ、所有者と作業フォルダの呼び出し情報、headlessページと表示の共有条件、OSのロック、待機中の取消、ダイアログの順序、後始末を確認します。任意の実ブラウザ検証では、ローカルの検証用ページと専用headless Chromeで入力・内容取得・画像・保存領域の分離・ダイアログ・並行操作・取消に加え、Cookie、localStorage、IndexedDBのスレッド間共有、タブ終了・タイムアウト・サービス再起動後の保持とログアウトを確認します。`DOZE_TEST_VIEWER=1` も指定すると、表示画面のアドレスバー・クリック・英字入力、別ページとの併用、表示の終了・異常終了・取消を検証します。画面表示が可能な環境が必要です。
 
-CIは「Run workflow」または `gh workflow run ci.yml -f os=windows-latest -f suite=browser` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。対象のOSに加え、通常の `light` と、固定版Chromeの取得・実ブラウザ・共同操作画面の検証を加えた `browser` を選べます。選んだOSで整形、Clippy、Rust、Nodeを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。
+CIは「Run workflow」または `gh workflow run ci.yml -f os=windows-latest -f suite=browser` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。npm配布物の作成・導入検証は、別の手動ワークフロー `npm-packages.yml` で4種類のOS・CPUに対して行い、npmへは公開しません。対象のOSに加え、通常の `light` と、固定版Chromeの取得・実ブラウザ・共同操作画面の検証を加えた `browser` を選べます。選んだOSで整形、Clippy、Rust、Nodeを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。
