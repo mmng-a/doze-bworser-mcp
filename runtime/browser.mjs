@@ -36,6 +36,23 @@ export function validateUrl(value) {
   return value;
 }
 
+/** Set the native preference through Chrome so its protected preference store stays valid. */
+async function configureSessionRestore(page) {
+  // The startup switch alone is insufficient in Windows headless mode.
+  await page.goto('chrome://settings/onStartup', { waitUntil: 'domcontentloaded', timeout: 0 });
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    if (!chrome.settingsPrivate) { reject(new Error('Dedicated Chrome session settings are unavailable')); return; }
+    chrome.settingsPrivate.getPref('session.restore_on_startup', pref => {
+      if (pref?.value === 1) { resolve(); return; }
+      chrome.settingsPrivate.setPref('session.restore_on_startup', 1, '', success => {
+        if (!success || chrome.runtime.lastError) reject(new Error('Cannot enable dedicated Chrome session restoration'));
+        else resolve();
+      });
+    });
+  }));
+  await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 0 });
+}
+
 /** The sole owner of Chromium, contexts, pages, and operation controllers. */
 export class BrowserManager {
   constructor(config, parents = new Map(), profilesDirectory) {
@@ -130,7 +147,7 @@ export class BrowserManager {
           const browser = await puppeteer.launch({ executablePath: this.config.chrome_path, headless: true,
             pipe: true, timeout: 0, protocolTimeout: 0, signal: startup.signal,
             userDataDir, defaultViewport: { width: 1440, height: 900 }, waitForInitialPage: false,
-            // Restore session cookies without reopening tabs that could repeat external actions.
+            // Do not reopen saved tabs that could repeat external actions.
             args: ['--no-startup-window', ...(project ? ['--restore-last-session'] : [])] });
           const session = await browser.target().createCDPSession();
           startup.signal.throwIfAborted();
@@ -169,6 +186,10 @@ export class BrowserManager {
         await page.emulateFocusedPage(true);
         page.setDefaultTimeout(0);
         page.setDefaultNavigationTimeout(0);
+        if (engine.persistent && !engine.sessionConfigured) {
+          await configureSessionRestore(page);
+          engine.sessionConfigured = true;
+        }
         const session = await page.createCDPSession();
         let targetId;
         try { targetId = (await session.send('Target.getTargetInfo')).targetInfo.targetId; }

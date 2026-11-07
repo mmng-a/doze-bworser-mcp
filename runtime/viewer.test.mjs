@@ -13,7 +13,9 @@ const enabled = process.env.DOZE_TEST_VIEWER && process.env.DOZE_BROWSER_CHROME;
 
 async function setup(t) {
   const folder = await mkdtemp(join(tmpdir(), 'doze viewer 日本語 '));
+  const requests = [];
   const server = createServer((request, response) => {
+    requests.push(request.url);
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     response.end('<title>Shared page</title><input aria-label="Name"><button onclick="document.querySelector(\'output\').textContent=\'clicked\'">Click</button><output></output>' +
       (request.url === '/dialog' ? '<script>window.started=1;alert("once");window.finished=true;</script>' : ''));
@@ -23,7 +25,7 @@ async function setup(t) {
   t.after(async () => { await manager.closeWhere(() => true); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(folder, { recursive: true, force: true }); });
   const caller = { thread: 'one', cwd: folder };
   const url = 'http://127.0.0.1:' + server.address().port;
-  return { manager, caller, url };
+  return { manager, caller, url, requests };
 }
 
 function canvasBounds() {
@@ -134,8 +136,8 @@ test('real viewer: initial navigation dialog retains the page and is handled wit
   assert.deepEqual(await record.page.evaluate(() => [window.started, window.finished]), [1, true]);
 });
 
-test('real browser: native profile keeps session and persistent cookies after immediate last-page closure', { skip: !enabled, timeout: 45_000 }, async t => {
-  const { manager, caller, url } = await setup(t);
+test('real browser: native profile retains cookies without replaying tabs after closure or crash', { skip: !enabled, timeout: 45_000 }, async t => {
+  const { manager, caller, url, requests } = await setup(t);
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);
   const process = record.engine.browser.process();
@@ -146,6 +148,14 @@ test('real browser: native profile keeps session and persistent cookies after im
   const started = Date.now();
   await manager.call(caller, 'close_page', first);
   t.diagnostic(JSON.stringify({ closeMilliseconds: Date.now() - started, exitCode: process.exitCode, signalCode: process.signalCode }));
-  const second = await manager.call(caller, 'open_page', { url });
+  const second = await manager.call(caller, 'open_page', { url: url + '/once' });
   assert.equal(await manager.pages.get(second.page_id).page.evaluate(() => document.cookie), 'session=saved; persistent=saved');
+  const browser = manager.pages.get(second.page_id).engine.browser;
+  const disconnected = once(browser, 'disconnected');
+  browser.process().kill('SIGKILL');
+  await disconnected;
+  await manager.closeWhere(() => true);
+  const third = await manager.call(caller, 'open_page', { url: url + '/next' });
+  assert.equal(await manager.pages.get(third.page_id).page.evaluate(() => document.cookie), 'session=saved; persistent=saved');
+  assert.equal(requests.filter(path => path === '/once').length, 1, 'restoring cookies must not revisit a previous tab');
 });

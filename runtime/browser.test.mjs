@@ -125,7 +125,7 @@ test('project tabs share one headless profile while views keep page ownership', 
         assert.deepEqual(options, { type: 'window', background: true });
         let closed = false;
         const page = Object.assign(new EventEmitter(), {
-          async emulateFocusedPage() {}, setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, async goto() {},
+          async emulateFocusedPage() {}, setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, async goto() {}, async evaluate() {},
           async createCDPSession() { return { async send() { return { targetInfo: { targetId: `target-${pages.length}` } }; }, async detach() {} }; },
           async close() { closed = true; page.emit('close'); }, isClosed: () => closed,
         });
