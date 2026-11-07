@@ -51,7 +51,16 @@ codex mcp add doze-bworser-mcp -- doze-bworser-mcp
 
 Homebrew builds the Rust launcher and installs Node.js and the runtime dependencies. The first `open_page` downloads the supported dedicated Chrome for Testing through Puppeteer's official browser manager. Your everyday browser is not used.
 
-If the MCP client cannot find Homebrew's executable, register the absolute path reported by `command -v doze-bworser-mcp`. To configure MCP directly:
+Alternatively, install with npm using Node.js 22.12 or newer. Rust is not required:
+
+```sh
+npm install -g doze-bworser-mcp@0.2.0
+codex mcp add doze-bworser-mcp -- doze-bworser-mcp
+```
+
+npm selects the native package for your OS and CPU automatically. Chrome for Testing downloads on first use. Choose either Homebrew or npm for the command installation.
+
+If the MCP client cannot find the executable, register the absolute path reported by `command -v doze-bworser-mcp` (PowerShell: `(Get-Command doze-bworser-mcp).Source`). To configure MCP directly:
 
 ```toml
 [mcp_servers.doze-bworser-mcp]
@@ -61,9 +70,9 @@ tool_timeout_sec = 90
 
 No installer or lifecycle hooks are required. The MCP server does not rewrite client configuration. On first startup, private transport credentials are prepared under `~/.config/doze-bworser-mcp`; dedicated browsers are stored under `~/.cache/doze-bworser-mcp`. Do not publish credential files. The first browser download can take some time.
 
-Before upgrading, close every MCP connection to this server and confirm the shared service has exited with `doze-bworser-mcp status`. Then run `brew upgrade mmng-a/tap/doze-bworser-mcp` and reconnect. Use `doze-bworser-mcp status` to inspect the shared service.
+Before upgrading, close every MCP connection to this server and confirm the shared service has exited with `doze-bworser-mcp status`. Then upgrade with the installation method you chose: `brew upgrade mmng-a/tap/doze-bworser-mcp` or `npm install -g doze-bworser-mcp@0.2.0`, and reconnect. Use `doze-bworser-mcp status` to inspect the shared service.
 
-Homebrew is available on macOS and Linux. Windows and source builds require Rust 1.89+, Node.js 22.12+ and npm:
+Homebrew is available on macOS and Linux; npm also supports Windows x64. To build from source, install Rust 1.89+, Node.js 22.12+ and npm:
 
 ```sh
 npm ci --ignore-scripts --prefix runtime
@@ -73,7 +82,7 @@ codex mcp add doze-bworser-mcp -- /absolute/path/to/target/release/doze-bworser-
 
 Source builds must explicitly select the runtime using `DOZE_RUNTIME_DIR` as above. Homebrew and npm archives set it automatically. In Windows PowerShell, set `$env:DOZE_RUNTIME_DIR = (Resolve-Path runtime).Path`, then run `cargo build --release --locked`.
 
-npm distribution is prepared but not published to the npm registry. See [npm/README.md](https://github.com/mmng-a/doze-bworser-mcp/blob/main/npm/README.md) for targets and validation steps.
+For npm distribution targets and maintainer steps, see [npm/README.md](https://github.com/mmng-a/doze-bworser-mcp/blob/main/npm/README.md).
 
 MCP does not remove OS restrictions or tool approval requirements. Hosts that sandbox MCP processes must permit local IPC and browser downloading and startup.
 

@@ -51,7 +51,16 @@ codex mcp add doze-bworser-mcp -- doze-bworser-mcp
 
 HomebrewはRustで本体をビルドし、Node.jsと実行時の依存関係を配置します。初回の `open_page` で対応する専用のChrome for TestingをPuppeteerの公式ダウンローダーから取得します。普段使うブラウザには接続しません。
 
-MCPクライアントがHomebrewの実行ファイルを見つけられない場合は、`command -v doze-bworser-mcp` で確認した絶対パスを登録してください。MCP設定を直接書く場合は次のとおりです。
+npmから導入する場合は、Node.js 22.12以降を用意して次を実行します。Rustは不要です。
+
+```sh
+npm install -g doze-bworser-mcp@0.2.0
+codex mcp add doze-bworser-mcp -- doze-bworser-mcp
+```
+
+OSとCPUに合う実行ファイルはnpmが自動で選び、専用Chromeは初回利用時に取得します。コマンドの導入にはHomebrewかnpmのどちらかを使ってください。
+
+MCPクライアントが実行ファイルを見つけられない場合は、`command -v doze-bworser-mcp`（PowerShellでは `(Get-Command doze-bworser-mcp).Source`）で確認した絶対パスを登録してください。MCP設定を直接書く場合は次のとおりです。
 
 ```toml
 [mcp_servers.doze-bworser-mcp]
@@ -61,9 +70,9 @@ tool_timeout_sec = 90
 
 専用インストーラーやフック登録は不要です。MCPサーバーはクライアントの設定ファイルを書き換えません。ローカル通信の認証情報は初回起動時に `~/.config/doze-bworser-mcp`、専用ブラウザは `~/.cache/doze-bworser-mcp` に準備します。設定ファイルを公開しないでください。初回のブラウザ取得には時間がかかることがあります。
 
-更新前に、このサーバーへのすべてのMCP接続を閉じ、`doze-bworser-mcp status` で共有サービスが終了したことを確認してください。その後 `brew upgrade mmng-a/tap/doze-bworser-mcp` を実行して再接続します。`doze-bworser-mcp status` で共有サービスの状態を確認できます。
+更新前に、このサーバーへのすべてのMCP接続を閉じ、`doze-bworser-mcp status` で共有サービスが終了したことを確認してください。その後、導入方法に合わせて `brew upgrade mmng-a/tap/doze-bworser-mcp` または `npm install -g doze-bworser-mcp@0.2.0` を実行し、再接続します。`doze-bworser-mcp status` で共有サービスの状態を確認できます。
 
-macOSとLinuxではHomebrewを利用できます。Windowsやソースからの導入にはRust 1.89以降、Node.js 22.12以降とnpmが必要です。
+macOSとLinuxではHomebrewを利用できます。npm版はWindows x64にも対応しています。ソースからビルドする場合は、Rust 1.89以降、Node.js 22.12以降とnpmが必要です。
 
 ```sh
 npm ci --ignore-scripts --prefix runtime
@@ -73,7 +82,7 @@ codex mcp add doze-bworser-mcp -- /absolute/path/to/target/release/doze-bworser-
 
 ソースからのビルドでは、上記の `DOZE_RUNTIME_DIR` で実行部の場所を明示します。Homebrew版とnpm配布物は自動で指定します。WindowsのPowerShellでビルドする場合は、先に `$env:DOZE_RUNTIME_DIR = (Resolve-Path runtime).Path` を設定し、`cargo build --release --locked` を実行してください。
 
-npm配布物は準備段階で、まだnpmレジストリへ公開していません。配布対象と検証手順は [npm/README.md](https://github.com/mmng-a/doze-bworser-mcp/blob/main/npm/README.md) に記載しています。
+npm版の対応環境と、配布物の作成・検証手順は [npm/README.md](https://github.com/mmng-a/doze-bworser-mcp/blob/main/npm/README.md) に記載しています。
 
 MCPにしてもOSの制限やツールの承認はなくなりません。MCPプロセス自体を制限するホストでは、ローカルIPC、ブラウザのダウンロード・起動への許可が必要です。
 
