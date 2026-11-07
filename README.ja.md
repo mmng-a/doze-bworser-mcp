@@ -13,9 +13,17 @@ Codexの複数スレッドで専用のChrome for Testingを共有するローカ
 | 共有のNode | 公式MCP SDK、Puppeteer、所有者、順序、取消の管理 | 最後の接続が閉じて短い後始末の待機が終わるまで |
 | プロジェクトごとの専用Chromium | ページの表示と操作、保存済みのログイン状態の利用 | そのプロジェクトの最初の `open_page` から最後のタブ終了まで |
 
-Codexは標準入出力のMCPとしてRustを起動します。RustとNodeの間は、macOS・LinuxではUnixドメインソケット、Windowsでは名前付きパイプを使います。RustはMCPを解釈せず、内部用のブラウザ操作RPCも持ちません。MCPを処理するのはNodeだけです。接続開始時にHMAC-SHA256で相互認証し、資格情報そのものは送信しません。Unixソケットは専用の非公開ディレクトリに置きます。小さな認証メッセージで、MCPのストリームか、状態確認の処理かを選びます。TCPの待受、HTTP MCPの中継、ログイン時の常駐サービスは使いません。
+Codexは標準入出力のMCPとしてRustを起動します。RustとNodeの間は、macOS・LinuxではUnixドメインソケット、Windowsでは名前付きパイプを使います。RustはMCPを解釈せず、内部用のブラウザ操作RPCも持ちません。MCPを処理するのはNodeだけです。接続開始時にHMAC-SHA256で相互認証し、資格情報そのものは送信しません。Unixソケットは専用の非公開ディレクトリに置きます。小さな認証メッセージで、MCPのストリームか、状態確認の処理かを選びます。MCP用のTCP待受、HTTP MCPの中継、ログイン時の常駐サービスは使いません。
 
-Git管理下では作業ツリーのルートごと、Git管理外では作業フォルダごとに専用ブラウザと永続プロファイルを使います。同じ保存領域を使うスレッドはCookie等を共有し、担当ごとにタブを所有します。通常はheadless、明示された共同操作は画面表示で開きます。表示モードを切り替える前に、同じ保存領域を使うすべてのタブを閉じます。別の保存領域では異なるモードでも並行利用できます。ブラウザ操作とアクセシビリティ情報の取得にはpuppeteer-core 25.16.0の公開APIを使います。テキスト整形にはDevTools MCPのApache-2.0の実装を再利用します。DevTools MCPサーバー自体は起動しません。
+Git管理下では作業ツリーのルートごと、Git管理外では作業フォルダごとに専用ブラウザと永続プロファイルを使います。同じ保存領域を使うスレッドはCookie等を共有し、担当ごとにタブを所有します。操作対象のブラウザは常にheadlessで動きます。明示された共同操作では、別の専用ChromeにDevToolsのライブ表示を開きます。表示するのは同じページなので、Cookie等の同期やプロファイルの同時起動は不要です。headlessの別ページも並行利用でき、共有ブラウザを再起動しません。ブラウザ操作とアクセシビリティ情報の取得にはpuppeteer-core 25.16.0の公開APIを使います。テキスト整形にはDevTools MCPのApache-2.0の実装を再利用します。DevTools MCPサーバー自体は起動しません。
+
+## 共同操作の画面
+
+`open_page` の `headed: true`、または既存ページへの `show_page` で表示します。DevTools内のアドレスバー、戻る・進む・再読み込み、ページ上のクリック・入力を使えます。同じページでは利用者とAIが交代して操作してください。画面表示を閉じてもページは動き続け、再度 `show_page` で表示できます。`close_page` やMCP切断でページを閉じると、対応する表示も閉じます。最後の表示を閉じると表示用Chromeを終了します。表示用Chromeが異常終了しても、headlessのページは残ります。表示用タブの割当や終了が停止した場合は、表示用Chromeを強制終了し、他の共同操作画面も閉じる場合があります。
+
+表示中だけ、ページごとに `127.0.0.1` のランダムなポートでWebSocketを待ち受けます。ランダムな256ビットの接続パスとDevToolsのOriginを検証し、対象ページとその子ターゲットのCDPセッションだけに接続します。ブラウザ全体の終了や別タブへの接続は許可しません。ページや表示の終了時に接続を無効にします。Chrome自体のデバッグ用TCPポートは開きません。表示用Chromeの一時プロファイルには対象サイトのCookie等を保存せず、正常終了時に削除します。異常終了時にはOSの一時領域に残る場合があります。
+
+DevToolsの画面には日本語入力の制約があります。検証用の日本語挿入は対象ページへ届かず、実機キーボードでのIME操作は未確認です。ポップアップへの表示の自動切り替えも未対応です。
 
 ## ログイン状態の保存
 
@@ -70,6 +78,7 @@ MCPにしてもOSの制限やツールの承認はなくなりません。MCPプ
 | ツール | 引数 | 結果 |
 | --- | --- | --- |
 | `open_page` | `url`、任意の `headed` | `{ "page_id": "…" }` |
+| `show_page` | `page_id` | 既存ページの共同操作画面を表示して `OK` |
 | `list_pages` | なし | 自分のタブのID・URL・タイトル |
 | `inspect_page` | `page_id` | `uid` 付きのDevTools形式のテキスト |
 | `navigate_page` | `page_id`、`url` | DOMの準備後に `OK` |
@@ -105,9 +114,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 npm ci --ignore-scripts --prefix runtime
 npm test --prefix runtime
-DOZE_BROWSER_CHROME='/専用のChrome実行ファイルの絶対パス' cargo test --locked --test service
+DOZE_BROWSER_CHROME='/専用のChrome実行ファイルの絶対パス' DOZE_TEST_VIEWER=1 cargo test --locked --test service
 ```
 
-通常のテストではChromeを起動せず、並行した初回起動、SDKのスキーマ、所有者と作業フォルダの呼び出し情報、表示モードの切り替え条件、OSのロック、待機中の取消、ダイアログの順序、後始末を確認します。任意の実ブラウザ検証では、ローカルの検証用ページと専用headless Chromeで入力・内容取得・画像・保存領域の分離・ダイアログ・並行操作・取消に加え、Cookie、localStorage、IndexedDBのスレッド間共有、タブ終了・タイムアウト・サービス再起動後の保持とログアウトを確認します。
+通常のテストではChromeを起動せず、並行した初回起動、SDKのスキーマ、所有者と作業フォルダの呼び出し情報、headlessページと表示の共有条件、OSのロック、待機中の取消、ダイアログの順序、後始末を確認します。任意の実ブラウザ検証では、ローカルの検証用ページと専用headless Chromeで入力・内容取得・画像・保存領域の分離・ダイアログ・並行操作・取消に加え、Cookie、localStorage、IndexedDBのスレッド間共有、タブ終了・タイムアウト・サービス再起動後の保持とログアウトを確認します。`DOZE_TEST_VIEWER=1` も指定すると、表示画面のアドレスバー・クリック・英字入力、別ページとの併用、表示の終了・異常終了・取消を検証します。画面表示が可能な環境が必要です。
 
-CIは「Run workflow」または `gh workflow run ci.yml -f os=ubuntu-latest` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。選んだOSで整形、Clippy、Rust、Node、パッケージを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。
+CIは「Run workflow」または `gh workflow run ci.yml -f os=windows-latest -f suite=browser` で手動実行した場合だけ動作します。実行ごとにLinux・Windows・macOSから対象を選びます。pushとプルリクエストでは起動しません。対象のOSに加え、通常の `light` と、固定版Chromeの取得・実ブラウザ・共同操作画面の検証を加えた `browser` を選べます。選んだOSで整形、Clippy、Rust、Nodeを検証します。デプロイやサービスのインストールは行いません。ブランチは依頼で別の指定がない限り現在のものを使います。

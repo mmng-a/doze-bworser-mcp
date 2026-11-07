@@ -107,7 +107,7 @@ test('canceling the first browser download does not wait for it or launch a brow
   assert.equal(manager.pages.size, 0);
 });
 
-test('project tabs share a native profile and only switch display mode after all project tabs close', async t => {
+test('project tabs share one headless profile while views keep page ownership', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'doze-project-browser-'));
   const project = join(directory, 'project');
   const otherProject = join(directory, 'other');
@@ -115,11 +115,14 @@ test('project tabs share a native profile and only switch display mode after all
   const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 1 }, new Map(), join(directory, 'profiles'));
   t.after(async () => { await manager.closeWhere(() => true); await rm(directory, { recursive: true, force: true }); });
   const launches = [];
+  const viewed = [];
+  t.mock.method(manager.viewer, 'open', async record => { viewed.push(record.id); });
   t.mock.method(puppeteer, 'launch', async options => {
     launches.push(options);
     const pages = [];
     const browser = Object.assign(new EventEmitter(), {
-      defaultBrowserContext() { return { async newPage() {
+      defaultBrowserContext() { return { async newPage(options) {
+        assert.deepEqual(options, { type: 'window', background: true });
         let closed = false;
         const page = Object.assign(new EventEmitter(), {
           async emulateFocusedPage() {}, setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, async goto() {},
@@ -141,21 +144,21 @@ test('project tabs share a native profile and only switch display mode after all
   const first = await manager.call(one, 'open_page', { url: 'about:blank' });
   const second = await manager.call(two, 'open_page', { url: 'about:blank' });
   assert.equal(launches.length, 1);
-  await assert.rejects(manager.call(one, 'open_page', { url: 'about:blank', headed: true }), /Close all pages in this project/);
+  const headed = await manager.call(one, 'open_page', { url: 'about:blank', headed: true });
+  assert.equal(launches.length, 1);
+  assert.deepEqual(viewed, [headed.page_id]);
+  await manager.call(one, 'show_page', first);
+  assert.deepEqual(viewed, [headed.page_id, first.page_id]);
+  await assert.rejects(manager.call(two, 'show_page', first), /Page is closed/);
   await assert.rejects(manager.call(two, 'close_page', first), /Page is closed/);
   await manager.call(other, 'open_page', { url: 'about:blank', headed: true });
-  assert.equal(launches.length, 2, 'other projects can use a different mode concurrently');
-  await manager.call(one, 'close_page', first);
-  await assert.rejects(manager.call(one, 'open_page', { url: 'about:blank', headed: true }), /Close all pages/);
-  await manager.call(two, 'close_page', second);
-  const headed = await manager.call(one, 'open_page', { url: 'about:blank', headed: true });
-  assert.equal(launches[2].headless, false);
-  assert.equal(launches[0].headless, true);
-  assert.equal(launches[2].userDataDir, launches[0].userDataDir);
+  assert.equal(launches.length, 2);
+  assert.ok(launches.every(options => options.headless && options.pipe));
   assert.notEqual(launches[1].userDataDir, launches[0].userDataDir);
   assert.deepEqual(launches[0].args, ['--no-startup-window', '--restore-last-session']);
+  await manager.call(one, 'close_page', first);
+  await manager.call(two, 'close_page', second);
   await manager.call(one, 'close_page', headed);
   await manager.call(one, 'open_page', { url: 'about:blank' });
-  assert.equal(launches[3].headless, true);
-  assert.equal(launches[3].userDataDir, launches[0].userDataDir);
+  assert.equal(launches[2].userDataDir, launches[0].userDataDir);
 });

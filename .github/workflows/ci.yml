@@ -11,6 +11,14 @@ on:
           - ubuntu-latest
           - windows-latest
           - macos-latest
+      suite:
+        description: Test suite
+        required: true
+        type: choice
+        default: light
+        options:
+          - light
+          - browser
 permissions:
   contents: read
 jobs:
@@ -30,4 +38,12 @@ jobs:
       - run: npm test --prefix runtime
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Prepare pinned Chrome for browser tests
+        if: inputs.suite == 'browser'
+        shell: bash
+        run: |
+          node --input-type=module -e "import {chromePath} from './runtime/chrome.mjs'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'DOZE_BROWSER_CHROME=' + await chromePath() + '\nDOZE_TEST_VIEWER=1\nDOZE_TEST_MANAGED_CHROME=1\n')"
       - run: cargo test --locked
+        if: inputs.os != 'ubuntu-latest' || inputs.suite != 'browser'
+      - run: xvfb-run -a cargo test --locked
+        if: inputs.os == 'ubuntu-latest' && inputs.suite == 'browser'

@@ -13,9 +13,17 @@ A local MCP endpoint that shares a dedicated Chrome for Testing across Codex thr
 | Shared Node endpoint | Official MCP SDK, Puppeteer, ownership, queues, cancellation | Until the last connection closes, then a short cleanup delay |
 | Dedicated Chromium per project | Render and operate pages with saved login state | The project's first `open_page` through last page closure |
 
-Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no TCP listener, HTTP MCP relay, or OS login service.
+Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no MCP TCP listener, HTTP MCP relay, or OS login service.
 
-Each Git worktree root, or working folder outside Git, uses a dedicated browser and persistent profile. Threads using the same storage share cookies and other data; each caller owns its own pages. Normal operation is headless, while explicit joint viewing uses headed mode. Close all pages sharing that storage before switching display modes. Different storage locations can run concurrently in different modes. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
+Each Git worktree root, or working folder outside Git, uses a dedicated browser and persistent profile. Threads using the same storage share cookies and other data; each caller owns its own pages. Site browsers always run headless. Explicit joint viewing opens a live DevTools view in a separate dedicated Chrome. It displays the same page, so cookies need no synchronization and the profile is never opened by two browsers. Other headless pages continue concurrently without restarting the shared browser. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
+
+## Joint viewing
+
+Use `headed: true` with `open_page`, or `show_page` for an existing page. DevTools provides an address bar, back/forward/reload and mouse/keyboard interaction with the page. Take turns with the user on the same page. Closing the view keeps the page running; `show_page` can reopen it. Closing the page or disconnecting its MCP connection also closes its view. The last view closes display Chrome. A display Chrome crash leaves headless pages running. If display-tab allocation or cleanup stalls, display Chrome is terminated and other joint views may also close.
+
+Each open view has a WebSocket listener on a random `127.0.0.1` port. A random 256-bit capability path and the DevTools Origin are checked. Commands reach only the page and its attached child CDP sessions; browser shutdown and access to other tabs are blocked. Closing the page or view revokes the connection. Chrome itself exposes no TCP debugging port. Display Chrome uses a temporary profile without target-site cookies; normal shutdown removes it. A crash may leave it in the OS temporary directory.
+
+DevTools has limitations with Japanese input: synthetic Japanese insertion did not reach the target page, and physical keyboard IME operation has not been verified. Automatic switching to popup views is also unsupported.
 
 ## Saved login state
 
@@ -70,6 +78,7 @@ MCP does not remove OS restrictions or tool approval requirements. Hosts that sa
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `open_page` | `url`, optional `headed` | `{ "page_id": "…" }` |
+| `show_page` | `page_id` | `OK` after displaying the existing page for joint interaction |
 | `list_pages` | None | Own pages with IDs, URLs, titles |
 | `inspect_page` | `page_id` | DevTools-style accessibility text with `uid` references |
 | `navigate_page` | `page_id`, `url` | `OK` after DOM readiness |
@@ -105,9 +114,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 npm ci --ignore-scripts --prefix runtime
 npm test --prefix runtime
-DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' cargo test --locked --test service
+DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' DOZE_TEST_VIEWER=1 cargo test --locked --test service
 ```
 
-Default tests check concurrent cold startup, SDK schemas, ownership and workspace metadata, display-mode switching rules, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. Optional real-browser tests use local fixtures and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation, plus cookies, localStorage and IndexedDB shared across project threads, retained after tab closure, timeout and service restart, and cleared on logout.
+Default tests check concurrent cold startup, SDK schemas, ownership and workspace metadata, shared headless pages and views, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. Optional real-browser tests use local fixtures and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation, plus cookies, localStorage and IndexedDB shared across project threads, retained after tab closure, timeout and service restart, and cleared on logout. Add `DOZE_TEST_VIEWER=1` to verify the address bar, clicks, ASCII input, parallel pages, view closure/crash and cancellation. These tests require a graphical environment.
 
-CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=ubuntu-latest`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The selected runner performs formatting, Clippy, Rust, Node and package checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
+CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=windows-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. Choose `light` for the default suite or `browser` to also download pinned Chrome and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.

@@ -13,6 +13,7 @@
     "@modelcontextprotocol/server": "2.4.0",
     "@puppeteer/browsers": "3.2.6",
     "puppeteer-core": "25.16.0",
+    "ws": "8.22.1",
     "zod": "4.6.7"
   },
   "config": {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { PageController, PageClosed } from './controller.mjs';
 import { inspect } from './snapshot.mjs';
 import { workspaceKey, prepareProfile, GitRootMismatch } from './profiles.mjs';
+import { ViewerManager } from './viewer.mjs';
 
 /** Use Puppeteer's selection API for native options, preserving ordinary widget clicks. */
 async function selectOption(handle) {
@@ -45,6 +46,7 @@ export class BrowserManager {
     this.engines = new Map();
     this.locks = new Map();
     this.timeout = config.operation_timeout_seconds * 1000;
+    this.viewer = new ViewerManager(config);
   }
   register(thread, parent) {
     if (typeof thread !== 'string' || !thread.length || thread.length > 200) throw new Error('Invalid thread identity');
@@ -96,7 +98,7 @@ export class BrowserManager {
     }
     // An uncertain folder must not reuse another temporary folder's login state.
     const root = project ?? JSON.stringify([threadRoot, temporaryFolder ?? null]);
-    const key = project ? `project:${project}` : headed;
+    const key = project ? `project:${project}` : 'temporary';
     if (!this.config.chrome_path) {
       signal?.throwIfAborted();
       this.chrome ??= import('./chrome.mjs').then(module => module.chromePath()).catch(error => { this.chrome = null; throw error; });
@@ -115,9 +117,6 @@ export class BrowserManager {
       signal?.throwIfAborted();
       if (Date.now() - queuedAt >= this.timeout) throw new Error('Timed out waiting to open a page; request was not executed');
       let engine = this.engines.get(key);
-      if (project && engine && engine.headed !== headed) {
-        throw new Error(`Project browser is already running in ${engine.headed ? 'headed' : 'headless'} mode. Close all pages in this project before switching modes`);
-      }
       if (!engine) {
         const userDataDir = project ? await prepareProfile(this.profilesDirectory, project) : undefined;
         const { default: puppeteer } = await import('puppeteer-core');
@@ -128,14 +127,14 @@ export class BrowserManager {
         try {
           startup.signal.throwIfAborted();
           signal?.throwIfAborted();
-          const browser = await puppeteer.launch({ executablePath: this.config.chrome_path, headless: !headed,
+          const browser = await puppeteer.launch({ executablePath: this.config.chrome_path, headless: true,
             pipe: true, timeout: 0, protocolTimeout: 0, signal: startup.signal,
             userDataDir, defaultViewport: { width: 1440, height: 900 }, waitForInitialPage: false,
             // Restore session cookies without reopening tabs that could repeat external actions.
             args: ['--no-startup-window', ...(project ? ['--restore-last-session'] : [])] });
           const session = await browser.target().createCDPSession();
           startup.signal.throwIfAborted();
-          engine = { browser, session, groups: new Map(), persistent: !!project, headed };
+          engine = { browser, session, groups: new Map(), persistent: !!project };
         } catch (error) {
           startup.abort(error);
           throw startup.signal.reason;
@@ -165,7 +164,7 @@ export class BrowserManager {
           group = { context: engine.persistent ? engine.browser.defaultBrowserContext() : await engine.browser.createBrowserContext(), pages: new Set() };
           engine.groups.set(root, group);
         }
-        page = await group.context.newPage();
+        page = await group.context.newPage({ type: 'window', background: true });
         signal?.throwIfAborted();
         await page.emulateFocusedPage(true);
         page.setDefaultTimeout(0);
@@ -195,6 +194,7 @@ export class BrowserManager {
       } finally { clearTimeout(creationDeadline); signal?.removeEventListener('abort', abortCreation); }
     });
     try {
+      if (headed) await this.viewer.open(record, signal);
       await record.controller.run(() => this.perform(record, 'navigate_page', { url }), signal);
       return { page_id: id, ...(warning ? { warning } : {}) };
     } catch (error) {
@@ -223,6 +223,10 @@ export class BrowserManager {
       return records.filter(p => metadata.has(p.targetId)).map(p => ({ page_id: p.id, url: metadata.get(p.targetId).url, title: metadata.get(p.targetId).title }));
     }
     const record = this.get(caller, args.page_id);
+    if (name === 'show_page') {
+      await this.viewer.open(record, signal);
+      return 'OK';
+    }
     if (name === 'close_page') return record.controller.close(undefined, signal);
     if (name === 'handle_dialog') return record.controller.handle(args.accept, signal);
     return record.controller.run(() => this.perform(record, name, args), signal);
@@ -260,6 +264,7 @@ export class BrowserManager {
     return 'OK';
   }
   async dispose(record) {
+    await this.viewer.close(record.id);
     return this.serial(record.key, async () => {
       const { engine, group, page, id } = record;
       const timeout = setTimeout(() => engine.browser.process()?.kill('SIGKILL'), 3000);

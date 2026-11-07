@@ -23,7 +23,7 @@ test('unknown page allocation is bounded and interrupted on cancellation', async
     const context = { newPage() { entered.resolve(); return pending.promise; }, async close() {} };
     const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 0.02 });
     const browser = { async createBrowserContext() { return context; }, async close() {}, process() { return { kill() { killed = true; pending.reject(new Error('Browser terminated')); } }; } };
-    manager.engines.set(false, { groups: new Map(), browser });
+    manager.engines.set('temporary', { groups: new Map(), browser });
     const abort = new AbortController();
     const open = manager.call({ thread: 'root' }, 'open_page', { url: 'about:blank' }, abort.signal);
     const rejected = assert.rejects(open);

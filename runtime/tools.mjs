@@ -6,7 +6,8 @@ const page_id = z.string().min(1);
 const element = z.string().min(1);
 const url = z.string().url().refine(value => value === 'about:blank' || ['http:', 'https:'].includes(new URL(value).protocol), 'Use HTTP(S) or about:blank');
 const definitions = [
-  ['open_page', 'Open your own page with saved project storage. Close all project pages before switching headed mode. headed is only for explicit joint viewing.', { url, headed: z.boolean().optional() }],
+  ['open_page', 'Open your own page with saved project storage. headed opens a DevTools live view of the headless page and requires explicit joint viewing.', { url, headed: z.boolean().optional() }],
+  ['show_page', 'Show your existing page through DevTools without restarting it. Requires explicit joint viewing. Closing the view keeps the page open.', { page_id }],
   ['list_pages', 'List your own pages without starting Chromium.', {}, true],
   ['inspect_page', 'Read the accessibility tree as DevTools text. Use fresh uid references for click and fill.', { page_id }, true],
   ['navigate_page', 'Navigate your page and wait for DOM readiness.', { page_id, url }],
@@ -48,7 +49,7 @@ export function callerFromMeta(meta = {}, connection) {
 export function createMcp(manager, connection) {
   const server = new McpServer({ name: 'doze-bworser-mcp', version: '0.1.0' }, {
     capabilities: { experimental: { 'codex/sandbox-state': {} } },
-    instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. Close all project pages before switching headed mode. If open_page includes a warning, tell the user. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Headed mode requires explicit joint viewing. Formal project capture/check CLIs take precedence.',
+    instructions: 'Open your own page, pass page_id to every operation, and close it when finished. Project storage persists across threads and restarts; page ownership remains per thread. headed and show_page open a DevTools live view of the same headless page and require explicit joint viewing. Take turns with the user on the viewed page. Closing the view keeps the page open. DevTools has limitations with Japanese input and does not automatically switch to popups. If open_page includes a warning, tell the user. Different pages run concurrently. Calls wait for completion, except a pending dialog: use handle_dialog without repeating the interrupted operation. Use fresh inspect_page references. Formal project capture/check CLIs take precedence.',
   });
   for (const [name, description, shape, readOnly = false] of definitions) {
     server.registerTool(name, { description, inputSchema: z.strictObject(shape),
