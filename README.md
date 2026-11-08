@@ -119,6 +119,11 @@ Use `inspect_page` before element operations. Only references from the latest co
 - Closing a project's last page stops its Chromium and retains its profile. Temporary profiles used by non-Codex clients are removed. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
 - A successful input operation is not proof that an external business action succeeded. Check the resulting page when necessary.
 
+## Git workflow
+
+- `dev` holds ongoing development; `main` holds the code selected for distribution.
+- Changes move from `dev` to `main`.
+
 ## Validation and CI
 
 ```sh
@@ -132,4 +137,4 @@ DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' DOZE_TEST_VIEWER=1 carg
 
 Default tests check concurrent cold startup, SDK schemas, ownership and workspace metadata, shared headless pages and views, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. Optional real-browser tests use local fixtures and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation, plus cookies, localStorage and IndexedDB shared across project threads, retained after tab closure, timeout and service restart, and cleared on logout. Add `DOZE_TEST_VIEWER=1` to verify the address bar, clicks, ASCII input, parallel pages, view closure/crash and cancellation. These tests require a graphical environment.
 
-CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=windows-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The separate manual `npm-packages.yml` workflow builds and checks npm archives for four OS/CPU combinations without publishing them. Choose `light` for the default suite or `browser` to also download pinned Chrome and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service. Work uses the current branch unless a task specifies another policy.
+CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=windows-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The separate manual `npm-packages.yml` workflow builds and checks npm archives for four OS/CPU combinations without publishing them. Choose `light` for the default suite or `browser` to also download pinned Chrome and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service.
