@@ -10,13 +10,18 @@
     "test": "node --test *.test.mjs"
   },
   "dependencies": {
+    "@electron/get": "5.0.0",
     "@modelcontextprotocol/server": "2.4.0",
-    "@puppeteer/browsers": "3.2.6",
+    "extract-zip": "2.0.1",
     "puppeteer-core": "25.16.0",
-    "ws": "8.22.1",
     "zod": "4.6.7"
   },
   "config": {
-    "chrome_version": "156.0.8078.47"
+    "electron_version": "45.3.1"
+  },
+  "overrides": {
+    "extract-zip": {
+      "yauzl": "3.4.0"
+    }
   }
 }

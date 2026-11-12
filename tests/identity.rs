@@ -30,7 +30,13 @@ fn config_validation_and_supervisor_exclusion() {
     let path = temporary.path().join("config.json");
     let mut config = json!({"token":"a".repeat(64),"socket_path":"test","node_path":"node","daemon_path":"daemon.mjs","chrome_path":"chrome","operation_timeout_seconds":20});
     std::fs::write(&path, config.to_string()).unwrap();
-    assert!(read_config(&path).is_ok());
+    assert!(
+        read_config(&path)
+            .unwrap()
+            .electron_path
+            .as_os_str()
+            .is_empty()
+    );
     config["operation_timeout_seconds"] = json!(0);
     std::fs::write(&path, config.to_string()).unwrap();
     assert!(read_config(&path).is_err());

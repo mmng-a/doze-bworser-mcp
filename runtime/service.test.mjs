@@ -83,7 +83,7 @@ async function fixture(t) {
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-test-${randomUUID()}` : `/tmp/doze-test-${randomUUID()}.sock`;
   const path = join(directory, 'config.json');
   writeFileSync(path, JSON.stringify({ token: 'a'.repeat(64), socket_path: socket, node_path: process.execPath,
-    daemon_path: fileURLToPath(new URL('./daemon.mjs', import.meta.url)), chrome_path: process.env.DOZE_BROWSER_CHROME ?? '/missing/chrome', operation_timeout_seconds: 20 }));
+    daemon_path: fileURLToPath(new URL('./daemon.mjs', import.meta.url)), electron_path: process.env.DOZE_BROWSER_ELECTRON ?? '/missing/electron', operation_timeout_seconds: 20 }));
   const clients = [];
   t.after(async () => {
     await Promise.all(clients.map(c => c.child.exitCode === null ? c.close() : undefined));
@@ -121,7 +121,7 @@ test('concurrent stdio launchers share one cold Node endpoint and SDK schemas', 
   assert.equal(f.status().connections, 2);
 });
 
-test('real Chromium: ownership, native input, dialogs, ordering, cancellation and cleanup', { skip: !binary || !process.env.DOZE_BROWSER_CHROME, timeout: 60_000 }, async t => {
+test('real Electron: ownership, native input, dialogs, ordering, cancellation and cleanup', { skip: !binary || !process.env.DOZE_BROWSER_ELECTRON, timeout: 60_000 }, async t => {
   const html = `<title>Browser contract</title><h1>Example</h1><input aria-label="Name"><select aria-label="Choice"><option value="a">Alpha</option><option value="b">Beta</option></select><button onclick="alert('outcome may be unknown')">Dialog</button>`;
   const server = createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(html); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -195,7 +195,7 @@ test('real Chromium: ownership, native input, dialogs, ordering, cancellation an
   assert.equal(f.status().browsers, 0);
 });
 
-test('real Chromium: project state survives tab closure, timeout, disconnect and service restart', { skip: !binary || !process.env.DOZE_BROWSER_CHROME, timeout: 90_000 }, async t => {
+test('real Electron: project state survives tab closure, timeout, disconnect and service restart', { skip: !binary || !process.env.DOZE_BROWSER_ELECTRON, timeout: 90_000 }, async t => {
   let logins = 0;
   const server = createServer((req, res) => {
     if (req.url === '/cookies') {
@@ -248,7 +248,11 @@ test('real Chromium: project state survives tab closure, timeout, disconnect and
     db.close(); return 'OK';
   })()` }, 'first');
   const expected = { cookies: 'session=fixture; persistent=fixture', local: 'fixture', stored: { authenticated: true } };
-  const check = async (client, id, thread, wanted = expected) => assert.deepEqual(value(await client.tool('evaluate_script', { page_id: id, expression: `(${read})()` }, thread)), wanted);
+  const check = async (client, id, thread, wanted = expected) => {
+    const actual = value(await client.tool('evaluate_script', { page_id: id, expression: `(${read})()` }, thread));
+    const ordered = cookies => cookies.split('; ').sort().join('; ');
+    assert.deepEqual({ ...actual, cookies: ordered(actual.cookies) }, { ...wanted, cookies: ordered(wanted.cookies) });
+  };
   const shared = value(await two.tool('open_page', { url }, 'second')).page_id;
   await check(two, shared, 'second');
   assert.equal((await two.call('inspect_page', { page_id: page }, 'second').promise).result.isError, true);
@@ -292,7 +296,7 @@ test('real Chromium: project state survives tab closure, timeout, disconnect and
   assert.equal(f.status().browsers, 2, 'the plain folder and Git root use one browser each');
 });
 
-test('real Chromium: mismatched Git roots open isolated temporary pages with a warning and preserve saved profiles', { skip: !binary || !process.env.DOZE_BROWSER_CHROME, timeout: 60_000 }, async t => {
+test('real Electron: mismatched Git roots open isolated temporary pages with a warning and preserve saved profiles', { skip: !binary || !process.env.DOZE_BROWSER_ELECTRON, timeout: 60_000 }, async t => {
   const server = createServer((req, res) => res.end('<title>Temporary storage</title>'));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
@@ -348,7 +352,7 @@ test('a fake IPC endpoint cannot authenticate or obtain the credential', { skip:
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-auth-${randomUUID()}` : `/tmp/doze-auth-${randomUUID()}.sock`;
   const path = join(directory, 'config.json');
   const token = 'b'.repeat(64);
-  writeFileSync(path, JSON.stringify({ token, socket_path: socket, node_path: process.execPath, daemon_path: 'unused', chrome_path: 'unused' }));
+  writeFileSync(path, JSON.stringify({ token, socket_path: socket, node_path: process.execPath, daemon_path: 'unused', electron_path: 'unused' }));
   let received = '';
   let attempts = 0;
   const server = createIpcServer(stream => {
@@ -377,7 +381,7 @@ test('only startup transport failures reconnect; accepted MCP bytes are never re
     const socket = process.platform === 'win32' ? `\\\\.\\pipe\\doze-reconnect-${randomUUID()}` : `/tmp/doze-reconnect-${randomUUID()}.sock`;
     const path = join(directory, 'config.json');
     const token = 'c'.repeat(64);
-    writeFileSync(path, JSON.stringify({ token, socket_path: socket, node_path: process.execPath, daemon_path: 'unused', chrome_path: 'unused' }));
+    writeFileSync(path, JSON.stringify({ token, socket_path: socket, node_path: process.execPath, daemon_path: 'unused', electron_path: 'unused' }));
     let attempts = 0;
     let forwarded = 0;
     const server = createIpcServer(stream => {
@@ -437,7 +441,7 @@ test('plain stdio registration prepares one private endpoint without client conf
     assert.equal(text(await clients[0].tool('list_pages', {})), '[]');
     const result = JSON.parse(execFileSync(binary, ['status'], { env, encoding: 'utf8' }));
     assert.deepEqual(result, { connections: 3, pages: 0, browsers: 0 });
-    assert.equal(config.chrome_path, '');
+    assert.equal(config.electron_path, '');
     assert.equal(spawnSync(process.execPath, ['-e', 'require("fs").accessSync(process.argv[1])', join(directory, '.codex')]).status, 1);
   } finally {
     await Promise.all(clients.map(client => client.close()));
@@ -447,7 +451,7 @@ test('plain stdio registration prepares one private endpoint without client conf
   }
 });
 
-test('first browser use downloads its own Chrome without a separate installer', { skip: !binary || !process.env.DOZE_TEST_MANAGED_CHROME, timeout: 180_000 }, async () => {
+test('first browser use downloads its own Electron without a separate installer', { skip: !binary || !process.env.DOZE_TEST_MANAGED_ELECTRON, timeout: 180_000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'doze-managed-'));
   const env = { ...process.env, HOME: directory, USERPROFILE: directory };
   const client = new Client(undefined, env, 120_000);
@@ -456,8 +460,8 @@ test('first browser use downloads its own Chrome without a separate installer', 
     await client.initialize();
     config = JSON.parse(readFileSync(join(directory, '.config/doze-bworser-mcp/config.json'), 'utf8'));
     assert.equal(text(await client.tool('list_pages', {})), '[]');
-    const version = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).config.chrome_version;
-    const cache = join(directory, '.cache/doze-bworser-mcp', version);
+    const version = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).config.electron_version;
+    const cache = join(directory, '.cache/doze-bworser-mcp/electron', version, `${process.platform}-${process.arch}`);
     mkdirSync(cache, { recursive: true });
     writeFileSync(join(cache, 'interrupted-extraction'), 'partial');
     const page_id = value(await client.tool('open_page', { url: 'about:blank' })).page_id;

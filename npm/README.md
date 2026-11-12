@@ -9,7 +9,7 @@
 | Windows x64 | `x86_64-pc-windows-msvc` | `doze-bworser-mcp-win32-x64` |
 | Linux x64、glibc、Ubuntu 22.04以降相当 | `x86_64-unknown-linux-gnu` | `doze-bworser-mcp-linux-x64` |
 
-メインパッケージ `doze-bworser-mcp` が、npmの `optionalDependencies` と各パッケージの `os`・`cpu` で実行ファイルを選びます。Linux版はglibc向けです。対応するネイティブパッケージがない場合は起動時にエラーにします。利用端末ではRustのビルドを行わず、Node.js 22.12以降を使います。Git管理下の保存領域の判定にはGitも必要です。専用Chromeは従来どおり初回利用時に取得します。
+メインパッケージ `doze-bworser-mcp` が、npmの `optionalDependencies` と各パッケージの `os`・`cpu` で実行ファイルを選びます。Linux版はglibc向けです。対応するネイティブパッケージがない場合は起動時にエラーにします。利用端末ではRustのビルドを行わず、Node.js 22.12以降を使います。Git管理下の保存領域の判定にはGitも必要です。Electronは従来どおり初回利用時に取得します。
 
 Nodeの依存関係は `runtime/package-lock.json` から導入してメインパッケージに同梱します。利用者側のインストールスクリプトやGitHubからの実行ファイルダウンロードは使いません。ランチャーは導入先のNodeと実行部の絶対パスをRustへ渡すため、ビルド端末のパスや利用者の作業ディレクトリに依存しません。
 
@@ -24,7 +24,7 @@ npm run test:npm
 
 別ターゲットを指定する場合は `npm run package:npm -- <Rustターゲット>` を使います。対応するRustターゲットとリンカーが必要です。通常は各OS上で作成します。
 
-`dist/npm/<OS-CPU>/` にメインパッケージとネイティブパッケージの `.tgz` ができます。`test:npm` は一時ディレクトリへ二つのtarballをオフライン導入し、コマンドの起動、版番号、空白・日本語を含むパス、Node以外をPATHから外したMCP接続、切断後の終了、ネイティブパッケージ欠損時のエラーを確認します。Chromeは起動しません。
+`dist/npm/<OS-CPU>/` にメインパッケージとネイティブパッケージの `.tgz` ができます。`test:npm` は一時ディレクトリへ二つのtarballをオフライン導入し、コマンドの起動、版番号、空白・日本語を含むパス、Node以外をPATHから外したMCP接続、切断後の終了、ネイティブパッケージ欠損時のエラーを確認します。Electronは起動しません。
 
 実行時に必要なファイルだけを梱包します。Cookie、プロファイル、接続設定、開発用テスト、リポジトリ管理情報は含めません。生成した `dist` はGit管理外です。
 

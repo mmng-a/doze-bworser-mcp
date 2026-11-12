@@ -22,7 +22,8 @@ pub struct Config {
     pub socket_path: PathBuf,
     pub node_path: PathBuf,
     pub daemon_path: PathBuf,
-    pub chrome_path: PathBuf,
+    #[serde(default)]
+    pub electron_path: PathBuf,
     #[serde(default = "default_timeout")]
     pub operation_timeout_seconds: u64,
 }
@@ -108,7 +109,7 @@ pub fn local_config() -> Result<(PathBuf, Config)> {
             .map(PathBuf::from)
             .unwrap_or_else(|| option_env!("DOZE_NODE_PATH").unwrap_or("node").into()),
         daemon_path: runtime.join("daemon.mjs"),
-        chrome_path: PathBuf::new(),
+        electron_path: PathBuf::new(),
         operation_timeout_seconds: default_timeout(),
     };
     if !config.daemon_path.is_file() {

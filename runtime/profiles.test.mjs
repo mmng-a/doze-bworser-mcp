@@ -18,7 +18,7 @@ test('Codex storage uses sandboxCwd and refuses missing or invalid folder inform
   for (const uri of ['relative', 'https://example.com/', 'file:///example?query=1']) {
     assert.throws(() => callerFromMeta({ ...meta, 'codex/sandbox-state': { sandboxCwd: uri } }, 'connection'), /sandboxCwd/);
   }
-  const manager = new BrowserManager({ chrome_path: 'fixture', operation_timeout_seconds: 1 });
+  const manager = new BrowserManager({ electron_path: 'fixture', operation_timeout_seconds: 1 });
   const missing = callerFromMeta({ 'x-codex-turn-metadata': { thread_id: 'root' } }, 'connection');
   await assert.rejects(manager.call(missing, 'open_page', { url: 'about:blank' }), /sandboxCwd/);
   assert.equal(manager.engines.size, 0);

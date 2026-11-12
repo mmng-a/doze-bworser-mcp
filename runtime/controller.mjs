@@ -123,7 +123,7 @@ export class PageController extends EventEmitter {
     this.controls = result.catch(() => {});
     return result;
   }
-  handle(accept, signal) {
+  handle(accept, signal, promptText) {
     return this.control(async () => {
       const dialog = this.dialog;
       if (!dialog || dialog.handled) throw new Error('No JavaScript dialog is open on this page');
@@ -133,7 +133,7 @@ export class PageController extends EventEmitter {
       signal?.addEventListener('abort', abort, { once: true });
       const deadline = setTimeout(() => { void this.close(new PageClosed('Dialog response timed out; page closed. Open a new page')); }, this.timeout);
       try {
-        await (accept ? dialog.accept() : dialog.dismiss());
+        await (accept ? dialog.accept(promptText) : dialog.dismiss());
         if (this.dialog === dialog) { this.dialog = null; clearInterval(this.dialogWatch); }
         this.lastUsed = Date.now();
         if (active) {

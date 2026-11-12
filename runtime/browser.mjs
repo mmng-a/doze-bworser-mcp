@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { PageController, PageClosed } from './controller.mjs';
 import { inspect } from './snapshot.mjs';
 import { workspaceKey, prepareProfile, GitRootMismatch } from './profiles.mjs';
-import { ViewerManager } from './viewer.mjs';
+import { ElectronEngine } from './electron-engine.mjs';
+import { join } from 'node:path';
 
 /** Use Puppeteer's selection API for native options, preserving ordinary widget clicks. */
 async function selectOption(handle) {
@@ -36,23 +37,6 @@ export function validateUrl(value) {
   return value;
 }
 
-/** Set the native preference through Chrome so its protected preference store stays valid. */
-async function configureSessionRestore(page) {
-  // The startup switch alone is insufficient in Windows headless mode.
-  await page.goto('chrome://settings/onStartup', { waitUntil: 'domcontentloaded', timeout: 0 });
-  await page.evaluate(() => new Promise((resolve, reject) => {
-    if (!chrome.settingsPrivate) { reject(new Error('Dedicated Chrome session settings are unavailable')); return; }
-    chrome.settingsPrivate.getPref('session.restore_on_startup', pref => {
-      if (pref?.value === 1) { resolve(); return; }
-      chrome.settingsPrivate.setPref('session.restore_on_startup', 1, '', success => {
-        if (!success || chrome.runtime.lastError) reject(new Error('Cannot enable dedicated Chrome session restoration'));
-        else resolve();
-      });
-    });
-  }));
-  await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 0 });
-}
-
 /** The sole owner of Chromium, contexts, pages, and operation controllers. */
 export class BrowserManager {
   constructor(config, parents = new Map(), profilesDirectory) {
@@ -63,7 +47,7 @@ export class BrowserManager {
     this.engines = new Map();
     this.locks = new Map();
     this.timeout = config.operation_timeout_seconds * 1000;
-    this.viewer = new ViewerManager(config);
+    this.opening = new Map();
   }
   register(thread, parent) {
     if (typeof thread !== 'string' || !thread.length || thread.length > 200) throw new Error('Invalid thread identity');
@@ -116,16 +100,14 @@ export class BrowserManager {
     // An uncertain folder must not reuse another temporary folder's login state.
     const root = project ?? JSON.stringify([threadRoot, temporaryFolder ?? null]);
     const key = project ? `project:${project}` : 'temporary';
-    if (!this.config.chrome_path) {
-      signal?.throwIfAborted();
-      this.chrome ??= import('./chrome.mjs').then(module => module.chromePath()).catch(error => { this.chrome = null; throw error; });
+    if (!this.config.electron_path) {
+      this.download ??= import('./electron.mjs').then(module => module.electronPath()).catch(error => { this.download = null; throw error; });
       let abort;
       try {
-        const canceled = new Promise((_, reject) => {
+        this.config.electron_path = await Promise.race([this.download, new Promise((_, reject) => {
           abort = () => reject(signal.reason);
           signal?.addEventListener('abort', abort, { once: true });
-        });
-        this.config.chrome_path = await Promise.race([this.chrome, canceled]);
+        })]);
       } finally { signal?.removeEventListener('abort', abort); }
       signal?.throwIfAborted();
     }
@@ -135,99 +117,66 @@ export class BrowserManager {
       if (Date.now() - queuedAt >= this.timeout) throw new Error('Timed out waiting to open a page; request was not executed');
       let engine = this.engines.get(key);
       if (!engine) {
-        const userDataDir = project ? await prepareProfile(this.profilesDirectory, project) : undefined;
-        const { default: puppeteer } = await import('puppeteer-core');
-        const startup = new AbortController();
-        const abort = () => startup.abort(signal.reason);
-        signal?.addEventListener('abort', abort, { once: true });
-        const deadline = setTimeout(() => startup.abort(new Error('Browser startup timed out')), this.timeout);
-        try {
-          startup.signal.throwIfAborted();
-          signal?.throwIfAborted();
-          const browser = await puppeteer.launch({ executablePath: this.config.chrome_path, headless: true,
-            pipe: true, timeout: 0, protocolTimeout: 0, signal: startup.signal,
-            userDataDir, defaultViewport: { width: 1440, height: 900 }, waitForInitialPage: false,
-            // Do not reopen saved tabs that could repeat external actions.
-            args: ['--no-startup-window', ...(project ? ['--restore-last-session'] : [])] });
-          const session = await browser.target().createCDPSession();
-          startup.signal.throwIfAborted();
-          engine = { browser, session, groups: new Map(), persistent: !!project };
-        } catch (error) {
-          startup.abort(error);
-          throw startup.signal.reason;
-        } finally {
-          clearTimeout(deadline);
-          signal?.removeEventListener('abort', abort);
-        }
+        const profile = project ? await prepareProfile(join(this.profilesDirectory, 'electron'), project) : undefined;
+        engine = await ElectronEngine.launch(this.config.electron_path, profile, this.timeout, signal);
+        engine.groups = new Map();
         this.engines.set(key, engine);
-        engine.browser.on('disconnected', () => {
+        engine.on('created', entry => {
+          const parent = this.pages.get(entry.opener);
+          const owner = this.opening.get(entry.id) ?? parent;
+          if (!owner) return;
+          this.addRecord(entry, engine, owner);
+        });
+        engine.on('disconnected', () => {
           if (this.engines.get(key) === engine) this.engines.delete(key);
-          for (const p of this.pages.values()) if (p.engine === engine) {
-            void p.controller.close(new PageClosed('Browser disconnected; page is closed. Open a new page'));
+          for (const record of this.pages.values()) if (record.engine === engine) {
+            void record.controller.close(new PageClosed('Browser disconnected; open a new page'));
           }
         });
       }
-      const creationDeadline = setTimeout(() => engine.browser.process()?.kill('SIGKILL'), this.timeout);
       let group = engine.groups.get(root);
-      let page;
-      const abortCreation = () => {
-        if (page) void page.close().catch(() => engine.browser.process()?.kill('SIGKILL'));
-        else engine.browser.process()?.kill('SIGKILL');
-      };
-      signal?.addEventListener('abort', abortCreation, { once: true });
+      if (!group) { group = { pages: new Set(), partition: project ? 'persist:project' : 'temporary:' + randomUUID() }; engine.groups.set(root, group); }
+      this.opening.set(id, { id, owner: caller.thread, connection: caller.connection, root, key, group });
       try {
-        signal?.throwIfAborted();
-        if (!group) {
-          group = { context: engine.persistent ? engine.browser.defaultBrowserContext() : await engine.browser.createBrowserContext(), pages: new Set() };
-          engine.groups.set(root, group);
-        }
-        page = await group.context.newPage({ type: 'window', background: true });
-        signal?.throwIfAborted();
-        await page.emulateFocusedPage(true);
-        page.setDefaultTimeout(0);
-        page.setDefaultNavigationTimeout(0);
-        if (engine.persistent && !engine.sessionConfigured) {
-          await configureSessionRestore(page);
-          engine.sessionConfigured = true;
-        }
-        const session = await page.createCDPSession();
-        let targetId;
-        try { targetId = (await session.send('Target.getTargetInfo')).targetInfo.targetId; }
-        finally { await session.detach(); }
+        await engine.request('open', { page: id, partition: group.partition }, signal);
         signal?.throwIfAborted();
         if (!project && this.root(caller.thread) !== threadRoot) throw new Error('Caller parent changed while opening page');
-        const record = { id, owner: caller.thread, connection: caller.connection, root, key, engine, group, targetId, page };
-        record.controller = new PageController(page, () => this.dispose(record), this.timeout);
-        group.pages.add(id);
-        this.pages.set(id, record);
-        page.once('close', () => { void record.controller.close(); });
-        return record;
+        return this.pages.get(id);
       } catch (error) {
-        try {
-          if (page && !page.isClosed()) await page.close();
-          if (group?.pages.size === 0) {
-            if (!engine.persistent) await group.context.close();
-            engine.groups.delete(root);
-          }
-          if (engine.groups.size === 0) await engine.browser.close();
-        } catch { engine.browser.process()?.kill('SIGKILL'); }
+        await engine.request('close', { page: id }).catch(() => {});
+        const record = this.pages.get(id);
+        // The enclosing creation lock owns cleanup until creation finishes.
+        if (record) { this.pages.delete(id); group.pages.delete(id); record.controller.closed = error; }
+        if (!group.pages.size) engine.groups.delete(root);
+        if (!engine.groups.size) { this.engines.delete(key); await engine.close(); }
         throw error;
-      } finally { clearTimeout(creationDeadline); signal?.removeEventListener('abort', abortCreation); }
+      } finally { this.opening.delete(id); }
     });
     try {
-      if (headed) await this.viewer.open(record, signal);
+      if (headed) await record.engine.request('show', { page: id });
       await record.controller.run(() => this.perform(record, 'navigate_page', { url }), signal);
       return { page_id: id, ...(warning ? { warning } : {}) };
     } catch (error) {
       if (signal?.aborted) await record.controller.close();
-      // A dialog is an interruption with a usable page, not a failed creation.
       if (!record.controller.closed) error.message = `page_id: ${id}\n${warning ? warning + '\n' : ''}${error.message}`;
       throw error;
     }
   }
+  addRecord(entry, engine, owner) {
+    const record = { id: entry.id, owner: owner.owner, connection: owner.connection, root: owner.root, key: owner.key,
+      group: owner.group, engine, entry, targetId: entry.targetId };
+    record.controller = new PageController(entry, () => this.dispose(record), this.timeout);
+    entry.on('dialog-closed', () => record.controller.syncDialog());
+    entry.once('close', () => { void record.controller.close(); });
+    record.group.pages.add(record.id);
+    this.pages.set(record.id, record);
+    record.ready = engine.page(entry).then(page => { record.page = page; record.controller.page = page; return page; });
+    record.ready.catch(() => {});
+    return record;
+  }
   get(caller, id) {
     const record = this.pages.get(id);
-    if (!record || record.owner !== caller.thread) throw new PageClosed();
+    if (!record || record.owner !== caller.thread || record.controller.closed) throw new PageClosed();
     return record;
   }
   async call(caller, name, args, signal) {
@@ -237,28 +186,28 @@ export class BrowserManager {
       const records = [...this.pages.values()].filter(p => p.owner === caller.thread && !p.controller.closed);
       const metadata = new Map();
       await Promise.all([...new Set(records.map(p => p.engine))].map(async engine => {
-        const { targetInfos } = await engine.session.send('Target.getTargets', {}, { timeout: this.timeout });
-        for (const info of targetInfos) metadata.set(info.targetId, info);
+        for (const page of await engine.request('list')) metadata.set(page.id, page);
       }));
       signal?.throwIfAborted();
-      return records.filter(p => metadata.has(p.targetId)).map(p => ({ page_id: p.id, url: metadata.get(p.targetId).url, title: metadata.get(p.targetId).title }));
+      return records.filter(p => metadata.has(p.id)).map(p => ({ page_id: p.id, url: metadata.get(p.id).url, title: metadata.get(p.id).title }));
     }
     const record = this.get(caller, args.page_id);
     if (name === 'show_page') {
-      await this.viewer.open(record, signal);
+      await record.engine.request('show', { page: record.id });
       return 'OK';
     }
     if (name === 'close_page') return record.controller.close(undefined, signal);
-    if (name === 'handle_dialog') return record.controller.handle(args.accept, signal);
+    if (name === 'handle_dialog') return record.controller.handle(args.accept, signal, args.prompt_text);
     return record.controller.run(() => this.perform(record, name, args), signal);
   }
   async perform(record, name, args) {
-    const { page, controller } = record;
+    const page = await record.ready;
+    const { controller } = record;
     switch (name) {
       case 'navigate_page':
         validateUrl(args.url);
         controller.nodes.clear();
-        await page.goto(args.url, { waitUntil: 'domcontentloaded', timeout: 0 });
+        await record.engine.request('navigate', { page: record.id, url: args.url });
         break;
       case 'inspect_page': return inspect(controller);
       case 'click':
@@ -285,28 +234,17 @@ export class BrowserManager {
     return 'OK';
   }
   async dispose(record) {
-    await this.viewer.close(record.id);
+    await Promise.all([...this.pages.values()].filter(p => p.entry.opener === record.id).map(p => p.controller.close()));
     return this.serial(record.key, async () => {
-      const { engine, group, page, id } = record;
-      const timeout = setTimeout(() => engine.browser.process()?.kill('SIGKILL'), 3000);
+      const { engine, group, id } = record;
       try {
-        if (group.pages.size === 1 && !engine.persistent) await group.context.close();
-        else if (!page.isClosed()) await page.close();
-      } catch (error) {
-        if (engine.browser.connected !== false) {
-          engine.browser.process()?.kill('SIGKILL');
-          throw error;
-        }
+        if (engine.entries.has(id)) await engine.request('close', { page: id });
       } finally {
         group.pages.delete(id);
-        if (!group.pages.size) engine.groups.delete(record.root);
         this.pages.delete(id);
         record.controller.nodes.clear();
-        if (engine.groups.size === 0) {
-          try { await engine.browser.close(); }
-          finally { if (this.engines.get(record.key) === engine) this.engines.delete(record.key); }
-        }
-        clearTimeout(timeout);
+        if (!group.pages.size) engine.groups.delete(record.root);
+        if (!engine.groups.size) { if (this.engines.get(record.key) === engine) this.engines.delete(record.key); await engine.close(); }
       }
     });
   }

@@ -32,7 +32,7 @@ await rm(staging, { recursive: true, force: true });
 await Promise.all([mkdir(join(main, 'runtime'), { recursive: true }), mkdir(join(main, 'bin'), { recursive: true }), mkdir(join(native, 'bin'), { recursive: true })]);
 const common = { version: metadata.version, license: 'MIT AND Apache-2.0', repository: { type: 'git', url: 'https://github.com/mmng-a/doze-bworser-mcp.git' } };
 await writeFile(join(main, 'package.json'), JSON.stringify({
-  ...common, name: 'doze-bworser-mcp', description: 'Project-scoped persistent Chrome for concurrent Codex browser tools.',
+  ...common, name: 'doze-bworser-mcp', description: 'Project-scoped persistent Electron for concurrent Codex browser tools.',
   type: 'module', engines: metadata.engines, bin: { 'doze-bworser-mcp': 'bin/cli.mjs' },
   files: ['bin', 'runtime', 'LICENSE', 'README.md', 'README.ja.md'],
   dependencies: metadata.dependencies, bundledDependencies: Object.keys(metadata.dependencies),
@@ -45,8 +45,9 @@ await writeFile(join(native, 'package.json'), JSON.stringify({
 for (const file of ['LICENSE', 'README.md', 'README.ja.md']) await copyFile(join(root, file), join(main, file));
 await copyFile(join(root, 'LICENSE'), join(native, 'LICENSE'));
 for (const file of await readdir(join(root, 'runtime'))) {
-  if (file === 'package.json' || (file.endsWith('.mjs') && !file.endsWith('.test.mjs'))) await copyFile(join(root, 'runtime', file), join(main, 'runtime', file));
+  if (file === 'package.json' || file.endsWith('.cjs') || (file.endsWith('.mjs') && !file.endsWith('.test.mjs'))) await copyFile(join(root, 'runtime', file), join(main, 'runtime', file));
 }
+await cp(join(root, 'runtime/ui'), join(main, 'runtime/ui'), { recursive: true });
 await cp(join(root, 'runtime/vendor'), join(main, 'runtime/vendor'), { recursive: true });
 await cp(join(root, 'runtime/node_modules'), join(main, 'node_modules'), { recursive: true });
 await copyFile(join(root, 'npm/cli.mjs'), join(main, 'bin/cli.mjs'));

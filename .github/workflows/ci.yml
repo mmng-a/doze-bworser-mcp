@@ -38,12 +38,24 @@ jobs:
       - run: npm test --prefix runtime
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Prepare pinned Chrome for browser tests
+      - name: Prepare pinned Electron for browser tests
         if: inputs.suite == 'browser'
         shell: bash
         run: |
-          node --input-type=module -e "import {chromePath} from './runtime/chrome.mjs'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'DOZE_BROWSER_CHROME=' + await chromePath() + '\nDOZE_TEST_VIEWER=1\nDOZE_TEST_MANAGED_CHROME=1\n')"
+          node --input-type=module -e "import {electronPath} from './runtime/electron.mjs'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'DOZE_BROWSER_ELECTRON=' + await electronPath() + '\nDOZE_TEST_VIEWER=1\nDOZE_TEST_MANAGED_ELECTRON=1\n')"
       - run: cargo test --locked
         if: inputs.os != 'ubuntu-latest' || inputs.suite != 'browser'
-      - run: xvfb-run -a cargo test --locked
+      - name: Prepare Linux display and secure cookie storage
         if: inputs.os == 'ubuntu-latest' && inputs.suite == 'browser'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gnome-keyring libsecret-1-0 dbus-x11
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Test Linux browser with an unlocked temporary keyring
+        if: inputs.os == 'ubuntu-latest' && inputs.suite == 'browser'
+        run: |
+          dbus-run-session -- bash -euc '
+            printf "%s" "doze-ci-keyring" | gnome-keyring-daemon --unlock --components=secrets
+            export XDG_CURRENT_DESKTOP=GNOME
+            xvfb-run -a cargo test --locked
+          '

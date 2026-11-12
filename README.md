@@ -2,7 +2,9 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
-A local MCP endpoint that shares a dedicated Chrome for Testing across Codex threads. Different pages run concurrently; operations on one page run in order. Each call waits for completion, except an operation interrupted by a JavaScript dialog: respond with `handle_dialog` without repeating the operation.
+This development branch uses Electron. Published 0.2.0 packages still use Chrome; the joint-viewing interface described below has not been released.
+
+A local MCP endpoint that shares a dedicated Electron runtime across Codex threads. Different pages run concurrently; operations on one page run in order. Each call waits for completion, except an operation interrupted by a JavaScript dialog: respond with `handle_dialog` without repeating the operation.
 
 ## Architecture
 
@@ -11,19 +13,23 @@ A local MCP endpoint that shares a dedicated Chrome for Testing across Codex thr
 | Rust stdio launcher | Start or find the shared service, authenticate, forward bytes | One per MCP connection |
 | Shared Rust supervisor | Hold the OS file lock and wait for Node | One per running service |
 | Shared Node endpoint | Official MCP SDK, Puppeteer, ownership, queues, cancellation | Until the last connection closes, then a short cleanup delay |
-| Dedicated Chromium per project | Render and operate pages with saved login state | The project's first `open_page` through last page closure |
+| Dedicated Electron per project | Render and operate pages with saved login state | The project's first `open_page` through last page closure |
 
 Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no MCP TCP listener, HTTP MCP relay, or OS login service.
 
-Each Git worktree root, or working folder outside Git, uses a dedicated browser and persistent profile. Threads using the same storage share cookies and other data; each caller owns its own pages. Site browsers always run headless. Explicit joint viewing opens a live DevTools view in a separate dedicated Chrome. It displays the same page, so cookies need no synchronization and the profile is never opened by two browsers. Other headless pages continue concurrently without restarting the shared browser. Puppeteer-core 25.16.0 public APIs handle browser operations and accessibility snapshots. DevTools MCP's Apache-2.0 text formatter is reused; the DevTools MCP server is not run.
+Each Git worktree root, or working folder outside Git, uses one dedicated Electron process and persistent profile. Callers share project storage but own separate pages. Pages normally remain hidden. Explicit joint viewing shows the same live page without restarting it or interrupting other pages. Puppeteer-core public APIs handle input, screenshots and accessibility snapshots.
 
 ## Joint viewing
 
-Use `headed: true` with `open_page`, or `show_page` for an existing page. DevTools provides an address bar, back/forward/reload and mouse/keyboard interaction with the page. Take turns with the user on the same page. Closing the view keeps the page running; `show_page` can reopen it. Closing the page or disconnecting its MCP connection also closes its view. The last view closes display Chrome. A display Chrome crash leaves headless pages running. If display-tab allocation or cleanup stalls, display Chrome is terminated and other joint views may also close.
+Use `headed: true` with `open_page`, or `show_page` for an existing page. The window provides a URL field, back/forward/reload, related-page switching and a hide button. Take turns with the user on the same page. Closing the window hides it and keeps the page alive. `close_page` closes the page and its child pages.
 
-Each open view has a WebSocket listener on a random `127.0.0.1` port. A random 256-bit capability path and the DevTools Origin are checked. Commands reach only the page and its attached child CDP sessions; browser shutdown and access to other tabs are blocked. Closing the page or view revokes the connection. Chrome itself exposes no TCP debugging port. Display Chrome uses a temporary profile without target-site cookies; normal shutdown removes it. A crash may leave it in the OS temporary directory.
+Popups inherit the opener's owner and appear in `list_pages`. Hidden pages create hidden popups; popups opened during joint interaction are shown and the page selector can return to the opener. Respond to `alert`, `confirm` and `prompt` through MCP while hidden, or through the window's dialog while visible. `handle_dialog` accepts an optional `prompt_text`; omitting it uses the prompt's initial value.
 
-DevTools has limitations with Japanese input: synthetic Japanese insertion did not reach the target page, and physical keyboard IME operation has not been verified. Automatic switching to popup views is also unsupported.
+Site permission requests are denied while hidden and require confirmation in the joint UI when visible.
+
+Dedicated parent-child pipes carry browser control and CDP. No debugging TCP port is opened. Website content has no Node.js integration and is isolated from the browser UI.
+
+The runtime is pinned to Electron 45.3.1 because dialog handling uses an internal Electron event. Verify initial navigation, popups, dialog types and shutdown when updating it. Authentication providers that restrict embedded browsers, including Google OAuth, may reject sign-in. See [Google's OAuth policy](https://developers.google.com/identity/protocols/oauth2/policies).
 
 ## Saved login state
 
@@ -36,7 +42,7 @@ Working folders come automatically from `sandboxCwd` in Codex's experimental `co
 
 Symlinks to the same folder share storage. Separate checkouts and worktrees use separate storage. Git-managed folders require the Git executable. If the folder containing the nearest `.git` entry and the root returned by Git do not match, the page opens in an isolated temporary context without saved login state, and the result includes a warning. Temporary contexts are isolated by root thread and working folder and discarded when all their pages close. Saved profiles are left unchanged. Other discovery failures, including failed Git invocations, return an error. Folders outside Git do not invoke Git.
 
-Profiles are stored under `~/.config/doze-bworser-mcp/profiles/<hash-of-git-root-or-working-folder>/`. Cookies, localStorage, IndexedDB and other profile data survive tab closure, operation timeouts, MCP disconnections and service restarts. Startup enables native session restoration through dedicated Chrome's settings API, retaining session cookies too. Previous tabs are not reopened and operations are not replayed. Site-side expiration or revocation still requires signing in again. Unsaved changes immediately before an unexpected process exit may be lost.
+Profiles are stored under `~/.config/doze-bworser-mcp/profiles/electron/<workspace-hash>/`. Existing Chrome profiles are left untouched; the first use after migration requires signing in again. Cookies, localStorage and IndexedDB survive page closure, timeouts, MCP disconnects and service restarts. Session cookies, which Electron normally discards at restart, are saved separately using OS encryption and restored without changing expiration attributes. Signing out removes the saved cookies too. Unavailable secure encryption causes an error rather than plaintext storage. Previous pages and operations are never replayed. Site-side expiry, revocation or unsaved changes before a crash can still require signing in again.
 
 Profiles contain authentication data: do not commit or publish them. On Unix, profile directories are accessible only to their owner. Sign out through the target site. To remove all saved project data, close every MCP connection, confirm the service has exited with `doze-bworser-mcp status`, then delete the `profiles` directory.
 
@@ -49,7 +55,7 @@ brew install mmng-a/tap/doze-bworser-mcp
 codex mcp add doze-bworser-mcp -- doze-bworser-mcp
 ```
 
-Homebrew builds the Rust launcher and installs Node.js and the runtime dependencies. The first `open_page` downloads the supported dedicated Chrome for Testing through Puppeteer's official browser manager. Your everyday browser is not used.
+Homebrew builds the Rust launcher and installs Node.js and the runtime dependencies. The first `open_page` downloads the pinned Electron runtime through its official downloader. Your everyday browser is not used.
 
 Alternatively, install with npm using Node.js 22.12 or newer. Rust is not required:
 
@@ -58,7 +64,7 @@ npm install -g doze-bworser-mcp@0.2.0
 codex mcp add doze-bworser-mcp -- doze-bworser-mcp
 ```
 
-npm selects the native package for your OS and CPU automatically. Chrome for Testing downloads on first use. Choose either Homebrew or npm for the command installation.
+npm selects the native package for your OS and CPU automatically. Electron downloads on first use. Choose either Homebrew or npm for the command installation.
 
 If the MCP client cannot find the executable, register the absolute path reported by `command -v doze-bworser-mcp` (PowerShell: `(Get-Command doze-bworser-mcp).Source`). To configure MCP directly:
 
@@ -102,22 +108,24 @@ MCP does not remove OS restrictions or tool approval requirements. Hosts that sa
 | `set_viewport` | `page_id`, `width`, `height` | `OK` |
 | `take_screenshot` | `page_id`, optional `full_page` | PNG image |
 | `evaluate_script` | `page_id`, `expression` | JSON result, awaiting returned promises |
-| `handle_dialog` | `page_id`, `accept` | `OK` after the interrupted operation settles, or the next dialog |
+| `handle_dialog` | `page_id`, `accept`, optional `prompt_text` | `OK` after the interrupted operation settles, or the next dialog |
 | `close_page` | `page_id` | `OK` after closure |
 
 Results use MCP `content` only. For `open_page`, the first text block contains `{ "page_id": "…" }`; a separate text block contains a warning when temporary storage is used because of a Git root mismatch. Relay this warning to the user. URLs must be HTTP(S) or `about:blank`. Public schemas and argument validation come from the same Zod definitions through the official MCP SDK; strings such as `"false"` are not accepted as booleans.
 
-Use `inspect_page` before element operations. Only references from the latest completed inspection are valid. Native HTML options use Puppeteer's selection API; disabled or ambiguous options return errors. Custom widgets use normal clicks. The initial viewport is 1440×900; viewport emulation does not resize the user's window. Headed mode is only for explicit joint viewing. Formal project capture/check CLIs take precedence for deliverables.
+Use `inspect_page` before element operations. Only references from the latest completed inspection are valid. Native HTML options use Puppeteer's selection API; disabled or ambiguous options return errors. Custom widgets use normal clicks. Windows open at 1200×900; viewport emulation does not resize the user's window. Headed mode is only for explicit joint viewing. Formal project capture/check CLIs take precedence for deliverables.
 
 ## Operation and cleanup
 
 - Caller identity and workspace folders come from Codex metadata, not model-supplied arguments. Sharing storage does not grant access to another thread's pages. Disconnecting closes that connection's pages.
 - Pages idle for 30 minutes close automatically, including pages waiting for a dialog. Active operations are bounded separately. Old page IDs are never reassigned; open a new page after closure.
-- Queue waiting and active execution each default to 20 seconds. Browser startup and target listing are bounded too. Dialog input does not inherit an independent CDP deadline. Queued canceled or expired calls do not execute. Active cancellation or timeout closes the uncertain page; external effects may already have happened. Calls are never retried automatically.
+- Queue waiting and active execution each default to 20 seconds. Browser startup and target listing are bounded too. Dialog input does not inherit an independent CDP deadline. Queued canceled or expired calls do not execute. Active cancellation or timeout closes the uncertain page; external effects may already have happened. Calls are never retried automatically. A page that blocks navigation through `beforeunload` stays open and the navigation returns an error; approving that departure through MCP is not supported.
 - A dialog response does not release the page's operation slot. The original operation stays tracked, its execution deadline pauses during dialog input, and ordinary operations cannot overlap it. `handle_dialog` resumes and waits for it. A dialog during `open_page` reports the retained `page_id` in the error.
 - `close_page` interrupts active work. Cancellation before closure begins leaves the page alone; once begun, closure continues to completion. If page allocation cannot be canceled safely or page cleanup hangs, the affected dedicated browser is terminated, losing its other pages too.
-- Closing a project's last page stops its Chromium and retains its profile. Temporary profiles used by non-Codex clients are removed. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Chromium fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
+- Closing a project's last page stops its Electron process and retains its profile. Temporary profiles used by non-Codex clients are removed. Node remains while MCP clients are connected and exits after the last disconnect. If Node or Electron fails, affected pages are lost; reconnect and open a new page. Started browser actions are not replayed. Before MCP forwarding starts, startup disconnects and stopping notices reconnect within a 10-second budget. Authentication failures and started MCP requests are never retried.
 - A successful input operation is not proof that an external business action succeeded. Check the resulting page when necessary.
+
+Accessibility formatting uses code derived from Chrome DevTools MCP under Apache-2.0. Its license and attribution are retained in `runtime/vendor`.
 
 ## Git workflow
 
@@ -132,9 +140,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 npm ci --ignore-scripts --prefix runtime
 npm test --prefix runtime
-DOZE_BROWSER_CHROME='/absolute/path/to/dedicated/chrome' DOZE_TEST_VIEWER=1 cargo test --locked --test service
+DOZE_BROWSER_ELECTRON='/absolute/path/to/dedicated/electron' DOZE_TEST_VIEWER=1 cargo test --locked --test service
 ```
 
-Default tests check concurrent cold startup, SDK schemas, ownership and workspace metadata, shared headless pages and views, native locks, queue cancellation, dialog ordering, and cleanup without starting Chrome. Optional real-browser tests use local fixtures and dedicated headless Chrome for input, snapshots, screenshots, isolation, dialogs, concurrency and cancellation, plus cookies, localStorage and IndexedDB shared across project threads, retained after tab closure, timeout and service restart, and cleared on logout. Add `DOZE_TEST_VIEWER=1` to verify the address bar, clicks, ASCII input, parallel pages, view closure/crash and cancellation. These tests require a graphical environment.
+Default tests do not start Electron. They cover ownership, concurrency, cancellation, dialog waits and workspace storage. Real-browser tests use local fixtures and `DOZE_BROWSER_ELECTRON` to check input, inspection, screenshots, popups, dialogs, persistent storage and cleanup. Add `DOZE_TEST_VIEWER=1` to exercise URL navigation, dialog input and hiding through the joint UI. These tests require a display. The new runtime has not been verified on Windows.
 
-CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=windows-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The separate manual `npm-packages.yml` workflow builds and checks npm archives for four OS/CPU combinations without publishing them. Choose `light` for the default suite or `browser` to also download pinned Chrome and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service.
+Linux requires a display session and a Secret Service provider, such as GNOME Keyring, for OS encryption. CI supplies a virtual display and temporary keyring. ZIP extraction pins `yauzl` to 3.4.0 for Node 24+ compatibility. Only official Electron artifacts are extracted, after checksum verification by the download library.
+
+CI runs only when started manually with Run workflow or `gh workflow run ci.yml -f os=ubuntu-latest -f suite=browser`. Choose Linux, Windows or macOS for each run. Pushes and pull requests do not start CI. The separate manual `npm-packages.yml` workflow builds and checks npm archives for four OS/CPU combinations without publishing them. Choose `light` for the default suite or `browser` to also download pinned Electron and test real browsers and joint viewing. The selected runner performs formatting, Clippy, Rust and Node checks. It does not deploy or install the service.
