@@ -39,10 +39,14 @@ test('Electron: hidden pages, initial popup prompt, inherited ownership and nati
   await manager.call(caller, 'handle_dialog', { page_id: child.id, accept: true, prompt_text: '子ページへの回答' });
   assert.equal(await manager.call(caller, 'evaluate_script', { page_id: child.id, expression: 'window.reply' }), '子ページへの回答');
   assert.ok((await record.engine.request('list')).every(p => !p.visible));
+  t.diagnostic('Starting viewport screenshot');
   const png = await manager.call(caller, 'take_screenshot', first);
+  t.diagnostic('Viewport screenshot complete');
   assert.ok(Buffer.from(png.image, 'base64').length > 1000);
   assert.equal(record.page.viewport(), null, 'capture restores the original device metrics');
+  t.diagnostic('Starting full-page screenshot');
   const full = await manager.call(caller, 'take_screenshot', { ...first, full_page: true });
+  t.diagnostic('Full-page screenshot complete');
   assert.ok(Buffer.from(full.image, 'base64').length > 1000);
   assert.ok((await record.engine.request('list')).every(p => !p.visible));
   await manager.call(caller, 'close_page', first);
@@ -117,4 +121,18 @@ test('Electron: hidden permission requests are denied and visible requests use t
   await answered;
   assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: 'window.permissionResult' }), 'granted');
   assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: 'Notification.permission' }), 'granted');
+});
+
+for (const variant of ['view', 'clip', 'full']) test('Linux capture probe: ' + variant, { skip: !enabled || process.platform !== 'linux', timeout: 20_000 }, async t => {
+  const { manager, caller, url } = await setup(t);
+  const first = await manager.call(caller, 'open_page', { url });
+  const record = manager.pages.get(first.page_id);
+  await record.page.evaluate(() => { window.child = window.open('/callback'); });
+  const options = { type: 'png', fromSurface: variant !== 'view', fullPage: variant === 'full' };
+  if (variant === 'clip') { options.clip = await record.page.evaluate(() => ({x: scrollX, y: scrollY, width: innerWidth, height: innerHeight})); options.captureBeyondViewport = true; }
+  let timer;
+  try {
+    const png = await Promise.race([record.page.screenshot(options), new Promise((_, reject) => {timer = setTimeout(() => reject(new Error('Capture probe timed out: ' + variant)), 5000);})]);
+    assert.ok(png.length > 1000);
+  } finally { clearTimeout(timer); }
 });
