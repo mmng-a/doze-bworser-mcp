@@ -139,6 +139,13 @@ app.whenReady().then(async () => {
         case 'show': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); entry.window.show(); refresh(); result = true; break; }
         case 'close': entries.get(message.page)?.content.webContents.close({ waitForBeforeUnload: false }); result = true; break;
         case 'answer': { const entry = entries.get(message.page); if (!entry || entry.dialog?.info.id !== message.dialog) throw new Error('Dialog is no longer open'); finishDialog(entry, !!message.accept, message.text); result = true; break; }
+        case 'capture-probe': {
+          const entry = entries.get(message.page), wc = entry.content.webContents;
+          if (message.mode === 'ui-throttle') entry.window.webContents.setBackgroundThrottling(false);
+          else if (message.mode === 'focus') wc.focus();
+          else result = (await wc.capturePage()).toPNG().toString('base64');
+          break;
+        }
         case 'list': result = [...entries.values()].map(e => ({ id: e.id, url: e.content.webContents.getURL(), title: e.content.webContents.getTitle(), visible: e.window.isVisible() })); break;
         case 'quit':
           quitting = true;

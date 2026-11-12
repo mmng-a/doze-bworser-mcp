@@ -123,16 +123,20 @@ test('Electron: hidden permission requests are denied and visible requests use t
   assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: 'Notification.permission' }), 'granted');
 });
 
-for (const variant of ['view', 'clip', 'full']) test('Linux capture probe: ' + variant, { skip: !enabled || process.platform !== 'linux', timeout: 20_000 }, async t => {
+
+for (const variant of ['native', 'prime', 'ui-throttle', 'focus']) test('Linux capture probe: ' + variant, { skip: !enabled || process.platform !== 'linux', timeout: 20_000 }, async t => {
   const { manager, caller, url } = await setup(t);
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);
   await record.page.evaluate(() => { window.child = window.open('/callback'); });
-  const options = { type: 'png', fromSurface: variant !== 'view', fullPage: variant === 'full' };
-  if (variant === 'clip') { options.clip = await record.page.evaluate(() => ({x: scrollX, y: scrollY, width: innerWidth, height: innerHeight})); options.captureBeyondViewport = true; }
   let timer;
-  try {
-    const png = await Promise.race([record.page.screenshot(options), new Promise((_, reject) => {timer = setTimeout(() => reject(new Error('Capture probe timed out: ' + variant)), 5000);})]);
+  const action = async () => {
+    const image = await record.engine.request('capture-probe', { page: first.page_id, mode: variant });
+    t.diagnostic('Native capture preparation finished: ' + variant);
+    const png = variant === 'native' ? Buffer.from(image, 'base64') : await record.page.screenshot({ type: 'png' });
     assert.ok(png.length > 1000);
-  } finally { clearTimeout(timer); }
+    assert.ok((await record.engine.request('list')).every(p => !p.visible));
+  };
+  try { await Promise.race([action(), new Promise((_, reject) => {timer = setTimeout(() => reject(new Error('Capture probe timed out: ' + variant)), 5000);})]); }
+  finally { clearTimeout(timer); }
 });
