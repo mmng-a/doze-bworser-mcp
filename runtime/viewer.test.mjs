@@ -124,7 +124,7 @@ test('Electron: hidden permission requests are denied and visible requests use t
 });
 
 
-for (const variant of ['native', 'prime', 'ui-throttle', 'focus']) test('Linux capture probe: ' + variant, { skip: !enabled || process.platform !== 'linux', timeout: 20_000 }, async t => {
+for (const variant of ['native', 'prime', 'parent', 'ui-throttle', 'focus']) test('Linux capture probe: ' + variant, { skip: !enabled || process.platform !== 'linux', timeout: 20_000 }, async t => {
   const { manager, caller, url } = await setup(t);
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);

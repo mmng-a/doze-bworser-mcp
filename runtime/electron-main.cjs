@@ -143,7 +143,7 @@ app.whenReady().then(async () => {
           const entry = entries.get(message.page), wc = entry.content.webContents;
           if (message.mode === 'ui-throttle') entry.window.webContents.setBackgroundThrottling(false);
           else if (message.mode === 'focus') wc.focus();
-          else result = (await wc.capturePage()).toPNG().toString('base64');
+          else result = (await (message.mode === 'parent' ? entry.window.webContents : wc).capturePage()).toPNG().toString('base64');
           break;
         }
         case 'list': result = [...entries.values()].map(e => ({ id: e.id, url: e.content.webContents.getURL(), title: e.content.webContents.getTitle(), visible: e.window.isVisible() })); break;
