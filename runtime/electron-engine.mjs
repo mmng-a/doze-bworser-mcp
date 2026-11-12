@@ -123,9 +123,14 @@ export class ElectronEngine extends EventEmitter {
   async page(entry) {
     const target = await this.browser.waitForTarget(async target => {
       if (target.type() !== 'page') return false;
-      const session = await target.createCDPSession();
-      try { return (await session.send('Target.getTargetInfo', {}, { timeout: this.timeout })).targetInfo.targetId === entry.targetId; }
-      finally { await session.detach(); }
+      let session;
+      try {
+        session = await target.createCDPSession();
+        return (await session.send('Target.getTargetInfo', {}, { timeout: this.timeout })).targetInfo.targetId === entry.targetId;
+      } catch (error) {
+        if (/No target with given id|Target closed|Session closed/.test(error.message)) return false;
+        throw error;
+      } finally { await session?.detach().catch(() => {}); }
     }, { timeout: this.timeout });
     const page = await target.page();
     // Electron owns dialog replies, including dialogs raised before Page initialization.

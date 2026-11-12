@@ -30,7 +30,7 @@ window.doze.subscribe(next => {
     dialogId = next.dialog.id;
     $('dialog-title').textContent = next.dialog.type === 'prompt' ? '入力' : next.dialog.type === 'alert' ? 'メッセージ' : '確認';
     $('message').textContent = next.dialog.message;
-    $('origin').textContent = next.origin;
+    $('origin').textContent = next.dialog.origin || next.origin;
     $('prompt').hidden = next.dialog.type !== 'prompt';
     $('prompt').value = next.dialog.defaultValue || '';
     $('cancel').hidden = next.dialog.type === 'alert';

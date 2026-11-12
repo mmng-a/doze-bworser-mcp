@@ -227,7 +227,24 @@ export class BrowserManager {
       case 'press_key': await page.keyboard.press(args.key); break;
       case 'scroll_page': await page.evaluate((x, y) => scrollTo(x, y), args.x ?? 0, args.y); break;
       case 'set_viewport': await page.setViewport({ width: args.width, height: args.height }); break;
-      case 'take_screenshot': return { image: await page.screenshot({ type: 'png', encoding: 'base64', fullPage: args.full_page ?? false }) };
+      case 'take_screenshot': {
+        const viewport = page.viewport();
+        const before = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, x: scrollX, y: scrollY,
+          fullWidth: Math.max(innerWidth, document.documentElement.scrollWidth), fullHeight: Math.max(innerHeight, document.documentElement.scrollHeight) }));
+        const width = args.full_page ? before.fullWidth : before.width;
+        const height = args.full_page ? before.fullHeight : before.height;
+        try {
+          await page.setViewport({ ...viewport, width, height, deviceScaleFactor: before.deviceScaleFactor });
+          if (args.full_page) await page.evaluate(() => scrollTo(0, 0));
+          // Electron capturePage keeps hidden popup families renderable on Linux.
+          return { image: await record.engine.request('capture', { page: record.id, width, height, scale: before.deviceScaleFactor }) };
+        } finally {
+          if (!page.isClosed()) {
+            await page.setViewport(viewport);
+            if (args.full_page) await page.evaluate((x, y) => scrollTo(x, y), before.x, before.y);
+          }
+        }
+      }
       case 'evaluate_script': return (await page.evaluate(args.expression)) ?? null;
       default: throw new Error('Unknown operation');
     }

@@ -47,7 +47,7 @@ function configurePermissions(browserSession) {
     if (!entry || !entry.window.isVisible() || entry.dialog) { callback(false); return; }
     const labels = { media: 'カメラ・マイク', geolocation: '位置情報', notifications: '通知', 'clipboard-read': 'クリップボードの読み取り', 'clipboard-sanitized-write': 'クリップボードへの書き込み', fullscreen: '全画面表示', pointerLock: 'ポインターの固定' };
     const origin = new URL(details.requestingUrl || contents.getURL()).origin;
-    entry.dialog = { callback: accept => { if (accept) granted.add(permission + ':' + origin); callback(accept); }, info: { id: randomUUID(), type: 'permission', message: `このサイトによる「${labels[permission] || permission}」の使用を許可しますか？`, defaultValue: '' } };
+    entry.dialog = { callback: accept => { if (accept) granted.add(permission + ':' + origin); callback(accept); }, info: { id: randomUUID(), type: 'permission', origin, message: `このサイトによる「${labels[permission] || permission}」の使用を許可しますか？`, defaultValue: '' } };
     output({ event: 'dialog', page: entry.id, dialog: entry.dialog.info.id, ...entry.dialog.info });
     refresh();
   });
@@ -139,11 +139,17 @@ app.whenReady().then(async () => {
         case 'show': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); entry.window.show(); refresh(); result = true; break; }
         case 'close': entries.get(message.page)?.content.webContents.close({ waitForBeforeUnload: false }); result = true; break;
         case 'answer': { const entry = entries.get(message.page); if (!entry || entry.dialog?.info.id !== message.dialog) throw new Error('Dialog is no longer open'); finishDialog(entry, !!message.accept, message.text); result = true; break; }
-        case 'capture-probe': {
-          const entry = entries.get(message.page), wc = entry.content.webContents;
-          if (message.mode === 'ui-throttle') entry.window.webContents.setBackgroundThrottling(false);
-          else if (message.mode === 'focus') wc.focus();
-          else result = (await (message.mode === 'parent' ? entry.window.webContents : wc).capturePage()).toPNG().toString('base64');
+        case 'capture': {
+          const entry = entries.get(message.page);
+          if (!entry) throw new Error('Page is closed');
+          const bounds = entry.content.getBounds();
+          try {
+            entry.content.setBounds({ ...bounds, width: message.width, height: message.height });
+            await entry.content.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))');
+            const image = await entry.content.webContents.capturePage();
+            if (image.isEmpty()) throw new Error('Browser capture returned an empty image');
+            result = image.resize({ width: Math.round(message.width * message.scale), height: Math.round(message.height * message.scale) }).toPNG().toString('base64');
+          } finally { if (!entry.window.isDestroyed()) entry.content.setBounds(bounds); }
           break;
         }
         case 'list': result = [...entries.values()].map(e => ({ id: e.id, url: e.content.webContents.getURL(), title: e.content.webContents.getTitle(), visible: e.window.isVisible() })); break;

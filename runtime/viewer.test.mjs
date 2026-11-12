@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrowserManager } from './browser.mjs';
@@ -39,15 +39,15 @@ test('Electron: hidden pages, initial popup prompt, inherited ownership and nati
   await manager.call(caller, 'handle_dialog', { page_id: child.id, accept: true, prompt_text: '子ページへの回答' });
   assert.equal(await manager.call(caller, 'evaluate_script', { page_id: child.id, expression: 'window.reply' }), '子ページへの回答');
   assert.ok((await record.engine.request('list')).every(p => !p.visible));
-  t.diagnostic('Starting viewport screenshot');
   const png = await manager.call(caller, 'take_screenshot', first);
-  t.diagnostic('Viewport screenshot complete');
   assert.ok(Buffer.from(png.image, 'base64').length > 1000);
   assert.equal(record.page.viewport(), null, 'capture restores the original device metrics');
-  t.diagnostic('Starting full-page screenshot');
+  const before = await record.page.evaluate(() => { document.body.style.minHeight = '2000px'; document.body.insertAdjacentHTML('beforeend', '<div style="position:absolute;top:1950px;height:50px;width:100%;background:rgb(0,128,0)"></div>'); scrollTo(0, 200); return {width: innerWidth, height: innerHeight, scale: devicePixelRatio, y: scrollY}; });
   const full = await manager.call(caller, 'take_screenshot', { ...first, full_page: true });
-  t.diagnostic('Full-page screenshot complete');
-  assert.ok(Buffer.from(full.image, 'base64').length > 1000);
+  const fullBytes = Buffer.from(full.image, 'base64');
+  assert.ok(fullBytes.readUInt32BE(20) >= 2000 * before.scale);
+  assert.deepEqual(await record.page.evaluate(() => ({width: innerWidth, height: innerHeight, scale: devicePixelRatio, y: scrollY})), before);
+  await writeFile(join(tmpdir(), 'doze-electron-full.png'), fullBytes);
   assert.ok((await record.engine.request('list')).every(p => !p.visible));
   await manager.call(caller, 'close_page', first);
   assert.equal(manager.pages.size, 0);
@@ -121,22 +121,4 @@ test('Electron: hidden permission requests are denied and visible requests use t
   await answered;
   assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: 'window.permissionResult' }), 'granted');
   assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: 'Notification.permission' }), 'granted');
-});
-
-
-for (const variant of ['native', 'prime', 'parent', 'ui-throttle', 'focus']) test('Linux capture probe: ' + variant, { skip: !enabled || process.platform !== 'linux', timeout: 20_000 }, async t => {
-  const { manager, caller, url } = await setup(t);
-  const first = await manager.call(caller, 'open_page', { url });
-  const record = manager.pages.get(first.page_id);
-  await record.page.evaluate(() => { window.child = window.open('/callback'); });
-  let timer;
-  const action = async () => {
-    const image = await record.engine.request('capture-probe', { page: first.page_id, mode: variant });
-    t.diagnostic('Native capture preparation finished: ' + variant);
-    const png = variant === 'native' ? Buffer.from(image, 'base64') : await record.page.screenshot({ type: 'png' });
-    assert.ok(png.length > 1000);
-    assert.ok((await record.engine.request('list')).every(p => !p.visible));
-  };
-  try { await Promise.race([action(), new Promise((_, reject) => {timer = setTimeout(() => reject(new Error('Capture probe timed out: ' + variant)), 5000);})]); }
-  finally { clearTimeout(timer); }
 });
