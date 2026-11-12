@@ -17,7 +17,7 @@ A local MCP endpoint that shares a dedicated Electron runtime across Codex threa
 
 Codex launches Rust through standard MCP stdio. Rust and Node use Unix domain sockets on macOS/Linux and named pipes on Windows. Rust does not parse MCP or implement an internal browser RPC. Node is the only MCP endpoint. A small HMAC-SHA256 greeting authenticates both peers without transmitting the credential and selects the MCP stream or status query. Unix sockets live inside a private directory. There is no MCP TCP listener, HTTP MCP relay, or OS login service.
 
-Each Git worktree root, or working folder outside Git, uses one dedicated Electron process and persistent profile. Callers share project storage but own separate pages. Pages normally remain hidden. Explicit joint viewing shows the same live page without restarting it or interrupting other pages. Puppeteer-core public APIs handle input, screenshots and accessibility snapshots.
+Each Git worktree root, or working folder outside Git, uses one dedicated Electron process and persistent profile. Callers share project storage but own separate pages. Pages normally remain hidden. Explicit joint viewing shows the same live page without restarting it or interrupting other pages. Puppeteer-core public APIs handle input and accessibility snapshots.
 
 ## Joint viewing
 
@@ -26,6 +26,8 @@ Use `headed: true` with `open_page`, or `show_page` for an existing page. The wi
 Popups inherit the opener's owner and appear in `list_pages`. Hidden pages create hidden popups; popups opened during joint interaction are shown and the page selector can return to the opener. Respond to `alert`, `confirm` and `prompt` through MCP while hidden, or through the window's dialog while visible. `handle_dialog` accepts an optional `prompt_text`; omitting it uses the prompt's initial value.
 
 Site permission requests are denied while hidden and require confirmation in the joint UI when visible.
+
+Screenshots use Electron’s public capture API. Full-page captures temporarily expand the page rendering area, then restore its size and scroll position. The OS window is not resized.
 
 Dedicated parent-child pipes carry browser control and CDP. No debugging TCP port is opened. Website content has no Node.js integration and is isolated from the browser UI.
 
