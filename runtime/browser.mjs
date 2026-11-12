@@ -227,7 +227,13 @@ export class BrowserManager {
       case 'press_key': await page.keyboard.press(args.key); break;
       case 'scroll_page': await page.evaluate((x, y) => scrollTo(x, y), args.x ?? 0, args.y); break;
       case 'set_viewport': await page.setViewport({ width: args.width, height: args.height }); break;
-      case 'take_screenshot': return { image: await page.screenshot({ type: 'png', encoding: 'base64', fullPage: args.full_page ?? false }) };
+      case 'take_screenshot': {
+        const viewport = page.viewport();
+        // Hidden Linux views need explicit device metrics to produce a capture frame.
+        if (!viewport) await page.setViewport(await page.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio })));
+        try { return { image: await page.screenshot({ type: 'png', encoding: 'base64', fullPage: args.full_page ?? false }) }; }
+        finally { if (!viewport && !page.isClosed()) await page.setViewport(null); }
+      }
       case 'evaluate_script': return (await page.evaluate(args.expression)) ?? null;
       default: throw new Error('Unknown operation');
     }

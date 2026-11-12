@@ -33,18 +33,18 @@ test('Electron: hidden pages, initial popup prompt, inherited ownership and nati
     await new Promise(r => setTimeout(r, 20));
   }
   assert.ok(child?.controller.dialog, 'initial child dialog is captured before Puppeteer Page is available');
-  t.diagnostic('Initial popup prompt captured');
   assert.equal((await manager.call(caller, 'list_pages', {})).length, 2);
   await assert.rejects(manager.call({ thread: 'other' }, 'show_page', { page_id: child.id }), /Page is closed/);
   await assert.rejects(manager.call(caller, 'inspect_page', { page_id: child.id }), PendingDialog);
   await manager.call(caller, 'handle_dialog', { page_id: child.id, accept: true, prompt_text: '子ページへの回答' });
-  t.diagnostic('Initial popup prompt answered');
   assert.equal(await manager.call(caller, 'evaluate_script', { page_id: child.id, expression: 'window.reply' }), '子ページへの回答');
-  t.diagnostic('Popup Page initialized and script resumed');
   assert.ok((await record.engine.request('list')).every(p => !p.visible));
   const png = await manager.call(caller, 'take_screenshot', first);
-  t.diagnostic('Hidden parent screenshot captured');
   assert.ok(Buffer.from(png.image, 'base64').length > 1000);
+  assert.equal(record.page.viewport(), null, 'capture restores the original device metrics');
+  const full = await manager.call(caller, 'take_screenshot', { ...first, full_page: true });
+  assert.ok(Buffer.from(full.image, 'base64').length > 1000);
+  assert.ok((await record.engine.request('list')).every(p => !p.visible));
   await manager.call(caller, 'close_page', first);
   assert.equal(manager.pages.size, 0);
 });
