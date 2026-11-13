@@ -23,6 +23,8 @@ Each Git worktree root, or working folder outside Git, uses one dedicated Electr
 
 Use `headed: true` with `open_page`, or `show_page` for an existing page. Pages with the same owner and storage partition share one window. A single 48px row contains back/forward/reload and tabs. The selected tab expands to show its title and domain; click it again or press Command+L (Ctrl+L on Linux) to edit its URL in place. Other tabs show favicons, with overflow available under “⋯”.
 
+Shortcuts are registered through Electron menu accelerators. macOS uses application, File, Edit, View, History and Window menus. The standard Edit menu includes undo/redo, cut, copy, paste, paste and match style, and select all. On Linux the menu bar is normally hidden and can be shown with Alt.
+
 The controls follow the OS light/dark setting with a monochrome palette. Inactive tabs have both a background and a border.
 
 | Action | macOS | Linux |

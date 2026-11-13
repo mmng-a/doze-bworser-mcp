@@ -1,8 +1,7 @@
-const { app, BaseWindow, WebContentsView, ipcMain, session, nativeTheme } = require('electron');
+const { app, BaseWindow, WebContentsView, ipcMain, session, nativeTheme, Menu, MenuItem } = require('electron');
 const { join } = require('node:path');
 const { randomUUID } = require('node:crypto');
 const readline = require('node:readline');
-const { browserShortcut } = require('./shortcuts.cjs');
 const { preserveSessionCookies } = require('./session-cookies.cjs');
 const { pathToFileURL } = require('node:url');
 const profile = process.env.DOZE_ELECTRON_PROFILE;
@@ -14,6 +13,7 @@ const views = new Map();
 const configuredSessions = new WeakSet();
 const toolbarHeight = 48;
 let quitting = false;
+let browserMenu;
 const output = message => process.stdout.write(JSON.stringify(message) + '\n');
 const uiURL = pathToFileURL(join(__dirname, 'ui/index.html')).href;
 function pageState(entry) {
@@ -30,6 +30,7 @@ function state(view) {
     pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
 }
 function refresh() {
+  refreshStopMenu();
   for (const view of views.values()) if (!view.window.isDestroyed()) {
     for (const entry of entries.values()) if (entry.view === view && !entry.content.webContents.isDestroyed()) {
       entry.visible = view.active === entry.id && !entry.dialog;
@@ -62,37 +63,87 @@ function hideTab(view, id) {
   if (!view.tabs.length) view.window.hide();
   refresh();
 }
-function installShortcuts(contents, view) {
-  contents.on('before-input-event', (event, input) => {
-    const shortcut = browserShortcut(input, process.platform);
-    if (!shortcut || !view.window.isVisible()) return;
-    const entry = entries.get(view.active);
-    const wc = entry?.content.webContents;
-    if (!wc || (contents !== wc && contents !== view.ui.webContents)) return;
-    if (shortcut.action !== 'stop') event.preventDefault();
-    const { action, value } = shortcut;
-    if (action === 'tab') {
-      const id = view.tabs[value === 9 ? view.tabs.length - 1 : value - 1];
-      if (id) select(entries.get(id));
-    } else if (action === 'cycle') {
-      const index = (view.tabs.indexOf(view.active) + value + view.tabs.length) % view.tabs.length;
-      select(entries.get(view.tabs[index]));
-    } else if (action === 'hide-tab') hideTab(view, entry.id);
-    else if (action === 'hide-window') view.window.hide();
-    else if (!entry.dialog) {
-      if (action === 'url') { view.ui.webContents.focus(); view.ui.webContents.send('doze-focus-url'); }
-      else if (action === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
-      else if (action === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
-      else if (action === 'reload') wc.reload();
-      else if (action === 'reload-fresh') wc.reloadIgnoringCache();
-      else if (action === 'stop' && contents !== view.ui.webContents) wc.stop();
-      else if (action === 'zoom') wc.setZoomLevel(value === 0 ? 0 : Math.max(-5, Math.min(5, wc.getZoomLevel() + value)));
-    }
-  });
+function runShortcut(view, { action, value }) {
+  const entry = entries.get(view.active);
+  const wc = entry?.content.webContents;
+  if (!wc) return;
+  if (action === 'tab') {
+    const id = view.tabs[value === 9 ? view.tabs.length - 1 : value - 1];
+    if (id) select(entries.get(id));
+  } else if (action === 'cycle') {
+    const index = (view.tabs.indexOf(view.active) + value + view.tabs.length) % view.tabs.length;
+    select(entries.get(view.tabs[index]));
+  } else if (action === 'hide-tab') hideTab(view, entry.id);
+  else if (action === 'hide-window') view.window.hide();
+  else if (!entry.dialog) {
+    if (action === 'url') { view.ui.webContents.focus(); view.ui.webContents.send('doze-focus-url'); }
+    else if (action === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
+    else if (action === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
+    else if (action === 'reload') wc.reload();
+    else if (action === 'reload-fresh') wc.reloadIgnoringCache();
+    else if (action === 'stop') wc.stop();
+    else if (action === 'zoom') wc.setZoomLevel(value === 0 ? 0 : Math.max(-5, Math.min(5, wc.getZoomLevel() + value)));
+  }
+}
+function refreshStopMenu() {
+  const view = [...views.values()].find(view => view.window === BaseWindow.getFocusedWindow());
+  const entry = entries.get(view?.active);
+  const stop = browserMenu?.getMenuItemById('stop');
+  if (stop) stop.enabled = !!entry && !entry.dialog && entry.content.webContents.isFocused();
+}
+function installMenuShortcuts() {
+  const mac = process.platform === 'darwin';
+  const command = (label, accelerator, shortcut, options = {}) => ({ label, accelerator, ...options, click: (_item, window) => {
+    const view = [...views.values()].find(view => view.window === window);
+    if (view) runShortcut(view, shortcut);
+  } });
+  const alias = (accelerator, shortcut) => command('', accelerator, shortcut, { visible: false });
+  browserMenu = Menu.buildFromTemplate([
+    ...(mac ? [{ role: 'appMenu' }] : []),
+    { label: 'ファイル', submenu: [
+      command('URLを開く…', 'CommandOrControl+L', { action: 'url' }),
+      { type: 'separator' },
+      command('タブを隠す', 'CommandOrControl+W', { action: 'hide-tab' }),
+      command('ウインドウを隠す', 'CommandOrControl+Shift+W', { action: 'hide-window' }),
+    ] },
+    { role: 'editMenu', label: '編集' },
+    { label: '表示', submenu: [
+      command('再読み込み', 'CommandOrControl+R', { action: 'reload' }),
+      command('キャッシュを無視して再読み込み', 'CommandOrControl+Shift+R', { action: 'reload-fresh' }),
+      alias('F5', { action: 'reload' }),
+      alias('Shift+F5', { action: 'reload-fresh' }),
+      command('読み込みを停止', 'Escape', { action: 'stop' }, { id: 'stop', enabled: false }),
+      { type: 'separator' },
+      command('実際のサイズ', 'CommandOrControl+0', { action: 'zoom', value: 0 }),
+      command('拡大', 'CommandOrControl+Plus', { action: 'zoom', value: 1 }),
+      alias('CommandOrControl+=', { action: 'zoom', value: 1 }),
+      command('縮小', 'CommandOrControl+-', { action: 'zoom', value: -1 }),
+      { type: 'separator' },
+      { role: 'togglefullscreen' },
+    ] },
+    { label: '履歴', submenu: [
+      command('戻る', 'CommandOrControl+[', { action: 'back' }),
+      command('進む', 'CommandOrControl+]', { action: 'forward' }),
+      alias(mac ? 'Command+Left' : 'Alt+Left', { action: 'back' }),
+      alias(mac ? 'Command+Right' : 'Alt+Right', { action: 'forward' }),
+    ] },
+    mac ? { role: 'windowMenu', label: 'ウインドウ', id: 'window-menu' } : { label: 'ウインドウ', id: 'window-menu', submenu: [{ role: 'minimize' }] },
+  ]);
+  const windowMenu = browserMenu.getMenuItemById('window-menu').submenu;
+  windowMenu.append(new MenuItem({ type: 'separator' }));
+  windowMenu.append(new MenuItem(command('次のタブを表示', 'Control+Tab', { action: 'cycle', value: 1 })));
+  windowMenu.append(new MenuItem(command('前のタブを表示', 'Control+Shift+Tab', { action: 'cycle', value: -1 })));
+  if (mac) {
+    windowMenu.append(new MenuItem(alias('Command+Shift+]', { action: 'cycle', value: 1 })));
+    windowMenu.append(new MenuItem(alias('Command+Shift+[', { action: 'cycle', value: -1 })));
+  }
+  windowMenu.append(new MenuItem({ type: 'separator' }));
+  for (let number = 1; number <= 9; number++) windowMenu.append(new MenuItem(command(number === 9 ? '最後のタブを表示' : `${number}番目のタブを表示`, `CommandOrControl+${number}`, { action: 'tab', value: number })));
+  Menu.setApplicationMenu(browserMenu);
 }
 function createView(key) {
   const window = new BaseWindow({ show: false, width: 1200, height: 900, minWidth: 520, minHeight: 380,
-    title: 'doze', backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
+    title: 'doze', autoHideMenuBar: process.platform !== 'darwin', backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
   const ui = new WebContentsView({ webPreferences: { preload: join(__dirname, 'ui/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
   window.contentView.addChildView(ui);
   const view = { key, window, ui, tabs: [], active: null };
@@ -103,7 +154,9 @@ function createView(key) {
   });
   window.on('close', event => { if (!quitting) { event.preventDefault(); window.hide(); } });
   window.on('closed', () => { if (!ui.webContents.isDestroyed()) ui.webContents.close({ waitForBeforeUnload: false }); });
-  installShortcuts(ui.webContents, view);
+  ui.webContents.on('focus', refreshStopMenu);
+  ui.webContents.on('blur', refreshStopMenu);
+  window.on('focus', refreshStopMenu);
   ui.webContents.once('did-finish-load', refresh);
   resizeUI(view);
   void ui.webContents.loadURL(uiURL);
@@ -158,7 +211,8 @@ function make(id, partition, opener, options = {}, owner) {
   content.setVisible(true);
   resize(entry);
   const wc = content.webContents;
-  installShortcuts(wc, view);
+  wc.on('focus', refreshStopMenu);
+  wc.on('blur', refreshStopMenu);
   // Keep the native callback from creation, before Puppeteer can acquire the Page.
   // This version-pinned internal handler is the only non-public Electron integration.
   if (wc.listenerCount('-run-dialog') !== 1) throw new Error('Unsupported Electron dialog implementation');
@@ -231,6 +285,7 @@ nativeTheme.on('updated', () => {
 });
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
+  installMenuShortcuts();
   const flush = await preserveSessionCookies(session.fromPartition('persist:project'), join(profile, 'session-cookies.enc'), () => { output({ event: 'fatal', message: 'Cannot securely preserve session cookies' }); app.exit(1); });
   output({ ready: true });
   readline.createInterface({ input: process.stdin }).on('line', line => { void (async () => {

@@ -9,7 +9,7 @@ import { BrowserManager } from './browser.mjs';
 import { PendingDialog } from './controller.mjs';
 
 const enabled = !!process.env.DOZE_BROWSER_ELECTRON;
-async function setup(t, nativeKeys = false) {
+async function setup(t, nativeMenu = false) {
   const folder = await mkdtemp(join(tmpdir(), 'doze electron 日本語 '));
   const server = createServer((req, res) => {
     if (req.url.startsWith('/favicon.svg')) {
@@ -23,19 +23,25 @@ async function setup(t, nativeKeys = false) {
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   let executable = process.env.DOZE_BROWSER_ELECTRON;
-  if (nativeKeys) {
+  if (nativeMenu) {
     const main = fileURLToPath(new URL('./electron-main.cjs', import.meta.url));
-    const wrapper = join(folder, 'native-input.cjs');
-    const errorLog = join(folder, 'native-input-error.log');
+    const wrapper = join(folder, 'native-menu.cjs');
+    const errorLog = join(folder, 'native-menu-error.log');
     t.after(async () => { try { t.diagnostic(await readFile(errorLog, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; } });
     await writeFile(wrapper, `process.on('uncaughtException', error => { require('node:fs').appendFileSync(${JSON.stringify(errorLog)}, error.stack); process.exit(1); });
-const { app, webContents, nativeTheme } = require('electron');
+const { app, BaseWindow, Menu, webContents, nativeTheme } = require('electron');
 app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (_event, _level, message) => {
+    if (message === 'test-menu-state') contents.executeJavaScript('window.menuState=' + JSON.stringify(Menu.getApplicationMenu().items.map(item => ({label:item.label, visible:item.visible, items:item.submenu?.items.map(child => ({role:child.role, accelerator:child.accelerator}))}))));
     if (message.startsWith('test-native-theme:')) nativeTheme.themeSource = message.slice(18);
-    if (message.startsWith('test-native-key:')) {
-      const { target, ...input } = JSON.parse(message.slice(16));
-      webContents.fromDevToolsTargetId(target).sendInputEvent(input);
+    if (message.startsWith('test-native-menu:')) {
+      const { target, accelerator } = JSON.parse(message.slice(17));
+      const contents = webContents.fromDevToolsTargetId(target);
+      const window = BaseWindow.getAllWindows().find(window => window.contentView.children.some(view => view.webContents === contents));
+      const find = menu => { for (const item of menu.items) { if (item.accelerator === accelerator) return item; const nested = item.submenu && find(item.submenu); if (nested) return nested; } };
+      const item = find(Menu.getApplicationMenu());
+      if (!item) throw new Error('Missing menu accelerator: ' + accelerator);
+      item.click({}, window, contents);
     }
   });
 });
@@ -185,8 +191,7 @@ test('Electron tabs: one owner window, hide-only controls, redisplay and system 
   await assert.rejects(ui.evaluate(id => window.doze.act('switch', { page: id }), foreign.page_id), /Unknown shown page/);
   await ui.locator(`[data-page="${first.page_id}"] .tab-select`).click();
   await ui.waitForFunction(id => document.querySelector('.tab.active').dataset.page === id, {}, first.page_id);
-  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
-  await ui.keyboard.down(modifier); await ui.keyboard.press('l'); await ui.keyboard.up(modifier);
+  await ui.locator('.tab.active .tab-select').click();
   await ui.waitForFunction(() => document.activeElement.id === 'url');
   await ui.locator('#url').fill('file:///not-allowed');
   await ui.keyboard.press('Enter');
@@ -282,49 +287,53 @@ test('Electron tabs: shown popup uses its opener window and hiding retains its n
   assert.equal(manager.pages.size, 0);
 });
 
-test('Electron shortcuts: native input in sites and toolbar, hidden page retention, light and dark controls', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 45_000 }, async t => {
+test('Electron menus: standard editing roles, browser accelerators, hidden page retention and theme', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 45_000 }, async t => {
   const { manager, caller, url } = await setup(t, true);
   const pages = [];
   for (let i = 0; i < 10; i++) pages.push(await manager.call(caller, 'open_page', { url: url + '/' + i, headed: true }));
   const record = manager.pages.get(pages[0].page_id);
   const ui = await record.engine.page({ targetId: record.entry.uiTargetId });
   ui.setDefaultTimeout(5000);
-  const command = process.platform === 'darwin' ? 'meta' : 'control';
-  const key = async (page, keyCode, modifiers = [command]) => {
+  await ui.evaluate(() => console.log('test-menu-state'));
+  await ui.waitForFunction(() => !!window.menuState);
+  const menus = await ui.evaluate(() => window.menuState);
+  assert.ok(menus.every(menu => menu.visible));
+  const editRoles = menus.find(menu => menu.label === '編集').items.map(item => item.role);
+  for (const role of ['undo', 'redo', 'cut', 'copy', 'paste', 'pasteandmatchstyle', 'selectall', 'delete']) assert.ok(editRoles.includes(role), role);
+  for (const label of ['ファイル', '編集', '表示', '履歴', 'ウインドウ']) assert.ok(menus.some(menu => menu.label === label));
+  const menu = async (page, accelerator) => {
     const session = await page.createCDPSession();
     const { targetInfo } = await session.send('Target.getTargetInfo');
     await session.detach();
-    await ui.evaluate(data => {
-      for (const type of ['keyDown', 'keyUp']) console.log('test-native-key:' + JSON.stringify({ ...data, type }));
-    }, { target: targetInfo.targetId, keyCode, modifiers });
+    await ui.evaluate(data => console.log('test-native-menu:' + JSON.stringify(data)), { target: targetInfo.targetId, accelerator });
   };
   const active = id => ui.waitForFunction(id => document.querySelector('.tab.active')?.dataset.page === id, {}, id);
   await active(pages[9].page_id);
-  await key(manager.pages.get(pages[9].page_id).page, '1'); await active(pages[0].page_id);
-  await key(ui, '9'); await active(pages[9].page_id);
-  await key(ui, 'Tab', ['control']); await active(pages[0].page_id);
-  await key(ui, 'Tab', ['control', 'shift']); await active(pages[9].page_id);
-  await key(ui, '2'); await active(pages[1].page_id);
+  await menu(manager.pages.get(pages[9].page_id).page, 'CommandOrControl+1'); await active(pages[0].page_id);
+  await menu(ui, 'CommandOrControl+9'); await active(pages[9].page_id);
+  await menu(ui, 'Control+Tab'); await active(pages[0].page_id);
+  await menu(ui, 'Control+Shift+Tab'); await active(pages[9].page_id);
+  await menu(ui, 'CommandOrControl+2'); await active(pages[1].page_id);
   const site = manager.pages.get(pages[1].page_id).page;
-  await key(site, 'l'); await ui.waitForFunction(() => document.activeElement.id === 'url');
+  await menu(site, 'CommandOrControl+L'); await ui.waitForFunction(() => document.activeElement.id === 'url');
   const ring = () => ({ tab: getComputedStyle(document.querySelector('.tab.active')).outlineWidth, input: getComputedStyle(document.querySelector('#url')).outlineStyle, button: getComputedStyle(document.querySelector('.tab.active .tab-select')).outlineStyle });
   assert.deepEqual(await ui.evaluate(ring), { tab: '2px', input: 'none', button: 'none' });
-  await key(ui, '1'); await active(pages[0].page_id);
-  await key(record.page, 'l'); await ui.waitForFunction(() => document.activeElement.id === 'url');
+  await menu(ui, 'CommandOrControl+1'); await active(pages[0].page_id);
+  await menu(record.page, 'CommandOrControl+L'); await ui.waitForFunction(() => document.activeElement.id === 'url');
   await ui.keyboard.press('Escape');
   assert.deepEqual(await ui.evaluate(ring), { tab: '2px', input: 'none', button: 'none' });
   await record.page.evaluate(() => history.pushState({}, '', '/next'));
-  await key(record.page, '['); await record.page.waitForFunction(() => location.pathname === '/0');
-  await key(record.page, ']'); await record.page.waitForFunction(() => location.pathname === '/next');
+  await menu(record.page, 'CommandOrControl+['); await record.page.waitForFunction(() => location.pathname === '/0');
+  await menu(record.page, 'CommandOrControl+]'); await record.page.waitForFunction(() => location.pathname === '/next');
   await record.page.evaluate(() => window.marker = 'before-reload');
-  await key(record.page, 'r'); await record.page.waitForFunction(() => window.marker && marker !== 'before-reload');
+  await menu(record.page, 'CommandOrControl+R'); await record.page.waitForFunction(() => window.marker && marker !== 'before-reload');
   await record.page.evaluate(() => window.marker = 'before-fresh-reload');
-  await key(ui, 'r', [command, 'shift']); await record.page.waitForFunction(() => window.marker && marker !== 'before-fresh-reload');
+  await menu(ui, 'CommandOrControl+Shift+R'); await record.page.waitForFunction(() => window.marker && marker !== 'before-fresh-reload');
   const width = await record.page.evaluate(() => innerWidth);
-  await key(ui, '='); await record.page.waitForFunction(width => innerWidth < width, {}, width);
-  await key(record.page, '0'); await record.page.waitForFunction(width => innerWidth === width, {}, width);
+  await menu(ui, 'CommandOrControl+='); await record.page.waitForFunction(width => innerWidth < width, {}, width);
+  await menu(record.page, 'CommandOrControl+0'); await record.page.waitForFunction(width => innerWidth === width, {}, width);
   const marker = await record.page.evaluate(() => window.marker);
-  await key(ui, 'w'); await active(pages[1].page_id);
+  await menu(ui, 'CommandOrControl+W'); await active(pages[1].page_id);
   assert.equal(await record.page.evaluate(() => window.marker), marker);
   assert.equal(manager.pages.size, 10);
   await manager.call(caller, 'show_page', pages[0]); await active(pages[0].page_id);
@@ -345,7 +354,7 @@ test('Electron shortcuts: native input in sites and toolbar, hidden page retenti
     assert.equal(palette.background, theme === 'dark' ? 'rgb(28, 28, 28)' : 'rgb(245, 245, 245)');
     await ui.screenshot({ path: join(tmpdir(), `doze-tabs-${theme}.png`), clip: { x: 0, y: 0, width: 1200, height: 48 } });
   }
-  await key(ui, 'w', [command, 'shift']);
+  await menu(ui, 'CommandOrControl+Shift+W');
   await waitFor(async () => (await record.engine.request('list')).every(page => !page.visible));
   assert.equal(manager.pages.size, 10);
 });
