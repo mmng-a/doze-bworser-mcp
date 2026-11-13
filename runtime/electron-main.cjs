@@ -183,7 +183,10 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
   switch (action) {
     case 'ready': refresh(); break;
     case 'close-window': view.window.close(); break;
-    case 'navigate': await navigate(entry, validateURL(args.url.includes('://') || args.url === 'about:blank' ? args.url : 'https://' + args.url)); wc.focus(); break;
+    case 'navigate':
+      await navigate(entry, validateURL(args.url.includes('://') || args.url === 'about:blank' ? args.url : 'https://' + args.url));
+      if (isShown(entry)) wc.focus();
+      break;
     case 'back': if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': wc.reload(); break;
