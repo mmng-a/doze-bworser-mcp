@@ -238,16 +238,19 @@ test('Electron tabs: compact single-row layout, overflow selection and favicon',
   await ui.waitForFunction(id => document.querySelector('.tab.active').dataset.page === id, {}, pages[1].page_id);
   const geometry = () => {
     const header = document.querySelector('header').getBoundingClientRect();
-    return { height: header.height, width: innerWidth, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
+    const last = document.querySelector('#overflow').hidden ? document.querySelector('#tabs') : document.querySelector('#overflow');
+    return { rightPadding: innerWidth - last.getBoundingClientRect().right, height: header.height, width: innerWidth, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
   };
   const normal = await ui.evaluate(geometry);
   assert.equal(normal.height, 48);
+  assert.equal(normal.rightPadding, 8);
   assert.ok(normal.tabs.every(tab => tab.y >= 0 && tab.bottom <= 48 && tab.right <= normal.width));
   assert.ok(normal.tabs.find(tab => tab.active).width > normal.tabs.find(tab => !tab.active).width);
   await ui.screenshot({ path: join(tmpdir(), 'doze-electron-tabs.png'), clip: { x: 0, y: 0, width: normal.width, height: 48 } });
   await ui.setViewport({ width: 520, height: 600 });
   await ui.waitForFunction(() => document.querySelector('#tabs').scrollWidth <= document.querySelector('#tabs').clientWidth);
   const narrow = await ui.evaluate(geometry);
+  assert.equal(narrow.rightPadding, 8);
   assert.ok(narrow.tabs.every(tab => tab.y >= 0 && tab.bottom <= 48 && tab.right <= narrow.width));
   assert.ok(narrow.tabs.some(tab => tab.active));
   await ui.screenshot({ path: join(tmpdir(), 'doze-electron-tabs-narrow.png'), clip: { x: 0, y: 0, width: 520, height: 48 } });
@@ -304,9 +307,12 @@ test('Electron shortcuts: native input in sites and toolbar, hidden page retenti
   await key(ui, '2'); await active(pages[1].page_id);
   const site = manager.pages.get(pages[1].page_id).page;
   await key(site, 'l'); await ui.waitForFunction(() => document.activeElement.id === 'url');
+  const ring = () => ({ tab: getComputedStyle(document.querySelector('.tab.active')).outlineWidth, input: getComputedStyle(document.querySelector('#url')).outlineStyle, button: getComputedStyle(document.querySelector('.tab.active .tab-select')).outlineStyle });
+  assert.deepEqual(await ui.evaluate(ring), { tab: '2px', input: 'none', button: 'none' });
   await key(ui, '1'); await active(pages[0].page_id);
   await key(record.page, 'l'); await ui.waitForFunction(() => document.activeElement.id === 'url');
   await ui.keyboard.press('Escape');
+  assert.deepEqual(await ui.evaluate(ring), { tab: '2px', input: 'none', button: 'none' });
   await record.page.evaluate(() => history.pushState({}, '', '/next'));
   await key(record.page, '['); await record.page.waitForFunction(() => location.pathname === '/0');
   await key(record.page, ']'); await record.page.waitForFunction(() => location.pathname === '/next');
