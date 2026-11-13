@@ -108,7 +108,7 @@ function installMenuShortcuts() {
       command('タブを隠す', 'CommandOrControl+W', { action: 'hide-tab' }),
       command('ウインドウを隠す', 'CommandOrControl+Shift+W', { action: 'hide-window' }),
     ] },
-    { role: 'editMenu', label: '編集' },
+    { role: 'editMenu', label: '編集', id: 'edit-menu' },
     { label: '表示', submenu: [
       command('再読み込み', 'CommandOrControl+R', { action: 'reload' }),
       command('キャッシュを無視して再読み込み', 'CommandOrControl+Shift+R', { action: 'reload-fresh' }),
@@ -131,6 +131,10 @@ function installMenuShortcuts() {
     ] },
     mac ? { role: 'windowMenu', label: 'ウインドウ', id: 'window-menu' } : { label: 'ウインドウ', id: 'window-menu', submenu: [{ role: 'minimize' }] },
   ]);
+  if (!mac) {
+    const editMenu = browserMenu.getMenuItemById('edit-menu').submenu;
+    editMenu.insert(editMenu.items.findIndex(item => item.role === 'paste') + 1, new MenuItem({ role: 'pasteAndMatchStyle' }));
+  }
   const windowMenu = browserMenu.getMenuItemById('window-menu').submenu;
   windowMenu.append(new MenuItem({ type: 'separator' }));
   windowMenu.append(new MenuItem(command('次のタブを表示', 'Control+Tab', { action: 'cycle', value: 1 })));

@@ -252,10 +252,11 @@ test('Electron tabs: compact single-row layout, overflow selection and favicon',
   const geometry = () => {
     const header = document.querySelector('header').getBoundingClientRect();
     const last = document.querySelector('#overflow').hidden ? document.querySelector('#tabs') : document.querySelector('#overflow');
-    return { leftDragSpace: document.querySelector('.tab').getBoundingClientRect().left - document.querySelector('#tabs').getBoundingClientRect().left, rightPadding: innerWidth - last.getBoundingClientRect().right, height: header.height, width: innerWidth, dragSpace: document.querySelector('#tabs').getBoundingClientRect().right - document.querySelector('.tab:last-child').getBoundingClientRect().right, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
+    return { clientWidth: document.documentElement.clientWidth, leftDragSpace: document.querySelector('.tab').getBoundingClientRect().left - document.querySelector('#tabs').getBoundingClientRect().left, rightPadding: innerWidth - last.getBoundingClientRect().right, height: header.height, width: innerWidth, dragSpace: document.querySelector('#tabs').getBoundingClientRect().right - document.querySelector('.tab:last-child').getBoundingClientRect().right, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
   };
   const normal = await ui.evaluate(geometry);
   assert.equal(normal.height, 48);
+  assert.equal(normal.clientWidth, normal.width, 'the toolbar does not create a vertical scrollbar');
   assert.equal(normal.rightPadding, 8);
   assert.ok(normal.tabs.find(tab => tab.active).width <= 640);
   assert.ok(normal.dragSpace >= 40, 'wide windows leave room to drag beside the tabs');
