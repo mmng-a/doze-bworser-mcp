@@ -10,10 +10,10 @@ button:hover { background: var(--hover); }
 button:disabled { opacity: .3; cursor: default; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 nav button { font-size: 18px; }
-#tabs { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; }
+#tabs { display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; min-width: 0; height: 100%; -webkit-app-region: drag; }
 .tab { display: flex; align-items: center; flex: 0 0 56px; height: 32px; min-width: 0; border: 1px solid var(--border); background: var(--tab); border-radius: 8px; -webkit-app-region: no-drag; }
 .tab:hover { background: var(--hover); }
-.tab.active { flex: 1; min-width: 140px; border-color: var(--border); background: var(--active); box-shadow: 0 1px 2px #00000004; }
+.tab.active { flex: 1; min-width: 140px; max-width: 640px; border-color: var(--border); background: var(--active); box-shadow: 0 1px 2px #00000004; }
 .tab-select { display: flex; align-items: center; justify-content: center; gap: 9px; flex: 1; padding: 0 5px; min-width: 0; height: 28px; }
 .tab:has(.tab-select:focus-visible, .tab-address input:focus-visible) { outline: 2px solid var(--text); outline-offset: 1px; }
 .tab-select:focus-visible, .tab-address input:focus-visible { outline: none; }

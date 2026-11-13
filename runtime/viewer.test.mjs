@@ -23,14 +23,14 @@ async function setup(t, nativeMenu = false) {
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   let executable = process.env.DOZE_BROWSER_ELECTRON;
-  if (nativeMenu) {
+  let errorLog;
+  if (process.platform !== 'win32') {
     const main = fileURLToPath(new URL('./electron-main.cjs', import.meta.url));
     const wrapper = join(folder, 'native-menu.cjs');
-    const errorLog = join(folder, 'native-menu-error.log');
-    t.after(async () => { try { t.diagnostic(await readFile(errorLog, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; } });
+    errorLog = join(folder, 'native-menu-error.log');
     await writeFile(wrapper, `process.on('uncaughtException', error => { require('node:fs').appendFileSync(${JSON.stringify(errorLog)}, error.stack); process.exit(1); });
 const { app, BaseWindow, Menu, webContents, nativeTheme } = require('electron');
-app.on('web-contents-created', (_event, contents) => {
+${nativeMenu ? `app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (_event, _level, message) => {
     if (message === 'test-menu-state') contents.executeJavaScript('window.menuState=' + JSON.stringify(Menu.getApplicationMenu().items.map(item => ({label:item.label, visible:item.visible, items:item.submenu?.items.map(child => ({role:child.role, accelerator:child.accelerator}))}))));
     if (message.startsWith('test-native-theme:')) nativeTheme.themeSource = message.slice(18);
@@ -44,7 +44,7 @@ app.on('web-contents-created', (_event, contents) => {
       item.click({}, window, contents);
     }
   });
-});
+});` : ''}
 require(${JSON.stringify(main)});`);
     const launcher = join(folder, 'electron-test');
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -53,7 +53,15 @@ require(${JSON.stringify(main)});`);
     executable = launcher;
   }
   const manager = new BrowserManager({ electron_path: executable, operation_timeout_seconds: 10 }, new Map(), join(folder, 'profiles'));
-  t.after(async () => { await manager.closeWhere(() => true); server.closeAllConnections(); await new Promise(r => server.close(r)); await rm(folder, { recursive: true, force: true }); });
+  t.after(async () => {
+    try { await manager.closeWhere(() => true); }
+    finally {
+      server.closeAllConnections(); await new Promise(r => server.close(r));
+      const errors = errorLog ? await readFile(errorLog, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; }) : '';
+      await rm(folder, { recursive: true, force: true });
+      assert.equal(errors, '', errors);
+    }
+  });
   return { manager, caller: { thread: 'one', connection: 'one', cwd: folder }, url: 'http://127.0.0.1:' + server.address().port };
 }
 
@@ -244,11 +252,14 @@ test('Electron tabs: compact single-row layout, overflow selection and favicon',
   const geometry = () => {
     const header = document.querySelector('header').getBoundingClientRect();
     const last = document.querySelector('#overflow').hidden ? document.querySelector('#tabs') : document.querySelector('#overflow');
-    return { rightPadding: innerWidth - last.getBoundingClientRect().right, height: header.height, width: innerWidth, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
+    return { leftDragSpace: document.querySelector('.tab').getBoundingClientRect().left - document.querySelector('#tabs').getBoundingClientRect().left, rightPadding: innerWidth - last.getBoundingClientRect().right, height: header.height, width: innerWidth, dragSpace: document.querySelector('#tabs').getBoundingClientRect().right - document.querySelector('.tab:last-child').getBoundingClientRect().right, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
   };
   const normal = await ui.evaluate(geometry);
   assert.equal(normal.height, 48);
   assert.equal(normal.rightPadding, 8);
+  assert.ok(normal.tabs.find(tab => tab.active).width <= 640);
+  assert.ok(normal.dragSpace >= 40, 'wide windows leave room to drag beside the tabs');
+  assert.ok(Math.abs(normal.dragSpace - normal.leftDragSpace) < 1, 'tabs are centered inside the available toolbar space');
   assert.ok(normal.tabs.every(tab => tab.y >= 0 && tab.bottom <= 48 && tab.right <= normal.width));
   assert.ok(normal.tabs.find(tab => tab.active).width > normal.tabs.find(tab => !tab.active).width);
   await ui.screenshot({ path: join(tmpdir(), 'doze-electron-tabs.png'), clip: { x: 0, y: 0, width: normal.width, height: 48 } });

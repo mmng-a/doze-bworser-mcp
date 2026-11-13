@@ -30,6 +30,7 @@ function state(view) {
     pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
 }
 function refresh() {
+  if (quitting) return;
   refreshStopMenu();
   for (const view of views.values()) if (!view.window.isDestroyed()) {
     for (const entry of entries.values()) if (entry.view === view && !entry.content.webContents.isDestroyed()) {
@@ -89,7 +90,8 @@ function refreshStopMenu() {
   const view = [...views.values()].find(view => view.window === BaseWindow.getFocusedWindow());
   const entry = entries.get(view?.active);
   const stop = browserMenu?.getMenuItemById('stop');
-  if (stop) stop.enabled = !!entry && !entry.dialog && entry.content.webContents.isFocused();
+  const contents = entry?.content.webContents;
+  if (stop) stop.enabled = !!contents && !contents.isDestroyed() && !entry.dialog && contents.isFocused();
 }
 function installMenuShortcuts() {
   const mac = process.platform === 'darwin';
@@ -240,8 +242,11 @@ function make(id, partition, opener, options = {}, owner) {
   for (const event of ['did-navigate-in-page', 'page-title-updated', 'did-stop-loading']) wc.on(event, refresh);
   wc.on('destroyed', () => {
     entries.delete(id);
-    if (view.tabs.includes(id)) hideTab(view, id);
-    for (const child of entries.values()) if (child.opener === id) child.content.webContents.close({ waitForBeforeUnload: false });
+    if (view.tabs.includes(id)) {
+      if (quitting || view.window.isDestroyed()) { view.tabs.splice(view.tabs.indexOf(id), 1); if (view.active === id) view.active = null; }
+      else hideTab(view, id);
+    }
+    for (const child of entries.values()) if (!quitting && child.opener === id && child.content.webContents && !child.content.webContents.isDestroyed()) child.content.webContents.close({ waitForBeforeUnload: false });
     output({ event: 'closed', page: id });
     if (![...entries.values()].some(e => e.view === view)) { views.delete(view.key); if (!view.window.isDestroyed()) view.window.destroy(); }
     refresh();
@@ -283,6 +288,7 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
 nativeTheme.on('updated', () => {
   for (const view of views.values()) view.window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5');
 });
+app.on('before-quit', () => { quitting = true; });
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
   installMenuShortcuts();
