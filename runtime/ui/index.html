@@ -1,6 +1,42 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self';"><meta name="viewport" content="width=device-width,initial-scale=1"><title>doze</title><link rel="stylesheet" href="style.css"></head>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https: http:;">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>doze</title>
+  <link rel="stylesheet" href="style.css">
+</head>
 <body>
-<header><span class="brand"><i></i>doze</span><nav aria-label="ページ操作"><button id="back" aria-label="戻る" title="戻る">←</button><button id="forward" aria-label="進む" title="進む">→</button><button id="reload" aria-label="再読み込み" title="再読み込み">↻</button></nav><form id="navigate"><label class="sr-only" for="url">URL</label><input id="url" aria-label="URL" spellcheck="false" autocomplete="off" placeholder="URLを入力"></form><label class="sr-only" for="pages">ページ切替</label><select id="pages" aria-label="ページ切替"></select><button id="hide" aria-label="画面を隠す" title="画面を隠す">↙</button></header>
-<main><section id="modal" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="message" hidden><div class="card"><span class="eyebrow" id="origin"></span><h1 id="dialog-title"></h1><p id="message"></p><form id="answer"><label class="sr-only" for="prompt">回答</label><input id="prompt" aria-label="回答" autocomplete="off"><div class="actions"><button type="button" id="cancel">キャンセル</button><button type="submit" class="primary">OK</button></div></form></div></section><p id="error" role="status"></p></main>
-<script src="app.js"></script></body></html>
+<header>
+  <nav aria-label="ページ操作">
+    <button id="back" aria-label="戻る" title="戻る">←</button>
+    <button id="forward" aria-label="進む" title="進む">→</button>
+    <button id="reload" aria-label="再読み込み" title="再読み込み">↻</button>
+  </nav>
+  <div id="tabs" role="tablist" aria-label="共同操作のページ"></div>
+  <select id="overflow" aria-label="ほかのページ" title="ほかのページ" hidden></select>
+</header>
+<template id="tab-template">
+  <div class="tab">
+    <button class="tab-select" role="tab">
+      <span class="favicon"><img alt="" referrerpolicy="no-referrer" hidden><span class="fallback" aria-hidden="true"></span></span>
+      <span class="identity"><span class="page-title"></span><span class="domain"></span></span>
+    </button>
+    <form class="tab-address"><input aria-label="URL" spellcheck="false" autocomplete="off" placeholder="URLを入力"></form>
+    <button class="tab-hide" title="このタブを隠す">×</button>
+  </div>
+</template>
+<main>
+  <section id="modal" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="message" hidden>
+    <div class="card"><span class="eyebrow" id="origin"></span><h1 id="dialog-title"></h1><p id="message"></p>
+      <form id="answer"><label class="sr-only" for="prompt">回答</label><input id="prompt" aria-label="回答" autocomplete="off">
+        <div class="actions"><button type="button" id="cancel">キャンセル</button><button type="submit" class="primary">OK</button></div>
+      </form>
+    </div>
+  </section>
+  <p id="error" role="status"></p>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

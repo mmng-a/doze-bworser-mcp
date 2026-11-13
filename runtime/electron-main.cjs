@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, session } = require('electron');
+const { app, BaseWindow, WebContentsView, ipcMain, session } = require('electron');
 const { join } = require('node:path');
 const { randomUUID } = require('node:crypto');
 const readline = require('node:readline');
@@ -9,23 +9,83 @@ if (!profile) throw new Error('Missing private browser profile');
 app.setPath('userData', profile);
 app.setName('doze');
 const entries = new Map();
+const views = new Map();
 const configuredSessions = new WeakSet();
+const toolbarHeight = 48;
 let quitting = false;
 const output = message => process.stdout.write(JSON.stringify(message) + '\n');
 const uiURL = pathToFileURL(join(__dirname, 'ui/index.html')).href;
-function state(entry) {
+function pageState(entry) {
+  const wc = entry.content.webContents;
+  return { id: entry.id, title: wc.getTitle(), url: wc.getURL(), favicon: entry.favicon };
+}
+function state(view) {
+  const entry = entries.get(view.active);
   let origin = '';
   try { origin = new URL(entry.content.webContents.getURL()).origin; } catch {}
-  const wc = entry.content.webContents;
-  return { id: entry.id, mac: process.platform === 'darwin', url: wc.getURL(), origin,
-    back: wc.navigationHistory.canGoBack(), forward: wc.navigationHistory.canGoForward(), dialog: entry.dialog?.info,
-    pages: [...entries.values()].filter(e => e.family === entry.family).map(e => ({ id: e.id, title: e.content.webContents.getTitle(), url: e.content.webContents.getURL() })) };
+  const wc = entry?.content.webContents;
+  return { id: entry?.id, mac: process.platform === 'darwin', url: wc?.getURL() || '', origin,
+    back: wc?.navigationHistory.canGoBack() || false, forward: wc?.navigationHistory.canGoForward() || false, dialog: entry?.dialog?.info,
+    pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
 }
 function refresh() {
-  for (const entry of entries.values()) if (!entry.window.isDestroyed() && !entry.content.webContents.isDestroyed()) {
-    entry.content.setVisible(!entry.dialog);
-    entry.window.webContents.send('doze-state', state(entry));
+  for (const view of views.values()) if (!view.window.isDestroyed()) {
+    for (const entry of entries.values()) if (entry.view === view && !entry.content.webContents.isDestroyed()) {
+      entry.visible = view.active === entry.id && !entry.dialog;
+
+    }
+    resizeUI(view);
+    view.ui.webContents.send('doze-state', state(view));
   }
+}
+function select(entry, showWindow = false) {
+  const view = entry.view;
+  if (!view.tabs.includes(entry.id)) view.tabs.push(entry.id);
+  view.active = entry.id;
+  resize(entry);
+  view.window.contentView.addChildView(entry.content);
+  view.window.contentView.addChildView(view.ui);
+  refresh();
+  if (showWindow) view.window.show();
+  if (view.window.isVisible()) { if (entry.dialog) view.ui.webContents.focus(); else entry.content.webContents.focus(); }
+}
+function hideTab(view, id) {
+  const index = view.tabs.indexOf(id);
+  if (index === -1) throw new Error('Tab is not shown');
+  view.tabs.splice(index, 1);
+  if (view.active === id) {
+    view.active = null;
+    const next = entries.get(view.tabs[Math.min(index, view.tabs.length - 1)]);
+    if (next) select(next);
+  }
+  if (!view.tabs.length) view.window.hide();
+  refresh();
+}
+function createView(key) {
+  const window = new BaseWindow({ show: false, width: 1200, height: 900, minWidth: 520, minHeight: 380,
+    title: 'doze', backgroundColor: '#f5f7f4', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
+  const ui = new WebContentsView({ webPreferences: { preload: join(__dirname, 'ui/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
+  window.contentView.addChildView(ui);
+  const view = { key, window, ui, tabs: [], active: null };
+  views.set(key, view);
+  window.on('resize', () => {
+    for (const entry of entries.values()) if (entry.view === view) resize(entry);
+    resizeUI(view);
+  });
+  window.on('close', event => { if (!quitting) { event.preventDefault(); window.hide(); } });
+  window.on('closed', () => { if (!ui.webContents.isDestroyed()) ui.webContents.close({ waitForBeforeUnload: false }); });
+  ui.webContents.once('did-finish-load', refresh);
+  resizeUI(view);
+  void ui.webContents.loadURL(uiURL);
+  return view;
+}
+function resizeUI(view) {
+  const [width, height] = view.window.getContentSize();
+  view.ui.setBounds({ x: 0, y: 0, width, height: entries.get(view.active)?.dialog ? height : toolbarHeight });
+}
+function resize(entry) {
+  const [width, height] = entry.view.window.getContentSize();
+  entry.content.setBounds({ x: 0, y: toolbarHeight, width, height: Math.max(1, height - toolbarHeight) });
 }
 function finishDialog(entry, accept, text) {
   const dialog = entry.dialog;
@@ -34,7 +94,9 @@ function finishDialog(entry, accept, text) {
   dialog.callback(accept, typeof text === 'string' ? text : dialog.info.defaultValue || '');
   output({ event: 'answered', page: entry.id, dialog: dialog.info.id });
   refresh();
+  if (entry.view.active === entry.id && entry.view.window.isVisible()) entry.content.webContents.focus();
 }
+function isShown(entry) { return entry.view.active === entry.id && entry.view.window.isVisible(); }
 function configurePermissions(browserSession) {
   if (configuredSessions.has(browserSession)) return;
   configuredSessions.add(browserSession);
@@ -44,7 +106,7 @@ function configurePermissions(browserSession) {
   });
   browserSession.setPermissionRequestHandler((contents, permission, callback, details) => {
     const entry = [...entries.values()].find(e => e.content.webContents === contents);
-    if (!entry || !entry.window.isVisible() || entry.dialog) { callback(false); return; }
+    if (!entry || !isShown(entry) || entry.dialog) { callback(false); return; }
     const labels = { media: 'カメラ・マイク', geolocation: '位置情報', notifications: '通知', 'clipboard-read': 'クリップボードの読み取り', 'clipboard-sanitized-write': 'クリップボードへの書き込み', fullscreen: '全画面表示', pointerLock: 'ポインターの固定' };
     const origin = new URL(details.requestingUrl || contents.getURL()).origin;
     entry.dialog = { callback: accept => { if (accept) granted.add(permission + ':' + origin); callback(accept); }, info: { id: randomUUID(), type: 'permission', origin, message: `このサイトによる「${labels[permission] || permission}」の使用を許可しますか？`, defaultValue: '' } };
@@ -52,54 +114,59 @@ function configurePermissions(browserSession) {
     refresh();
   });
 }
-function make(id, partition, opener, options = {}) {
+function make(id, partition, opener, options = {}, owner) {
   configurePermissions(session.fromPartition(partition));
-  const window = new BrowserWindow({ show: false, width: 1200, height: 900, minWidth: 520, minHeight: 380,
-    title: 'doze', backgroundColor: '#f5f7f4', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
-    webPreferences: { preload: join(__dirname, 'ui/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
-  // A renderer-created popup already has a WebContents. Reuse it to preserve
-  // its initial navigation, WindowProxy and opener relationship.
+  const key = JSON.stringify([partition, owner]);
+  const view = opener ? entries.get(opener).view : views.get(key) || createView(key);
+  // Reuse the renderer-created WebContents to retain the popup's initial navigation and opener.
   const content = new WebContentsView({ ...(options.webContents ? { webContents: options.webContents } : {}),
     webPreferences: { ...options.webPreferences, session: session.fromPartition(partition),
       preload: join(__dirname, 'electron-prompt.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
-  window.contentView.addChildView(content);
-  const entry = { id, partition, opener, family: opener ? entries.get(opener).family : id, window, content };
+  view.window.contentView.addChildView(content, 0);
+  const entry = { id, partition, opener, view, content, favicon: '', visible: true };
   entries.set(id, entry);
+  content.setVisible(true);
+  resize(entry);
   const wc = content.webContents;
-  const resize = () => { const [width, height] = window.getContentSize(); content.setBounds({ x: 0, y: 64, width, height: Math.max(1, height - 64) }); };
-  resize(); window.on('resize', resize);
   wc.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && (input.meta || input.control) && input.key.toLowerCase() === 'l') { event.preventDefault(); window.webContents.focus(); window.webContents.send('doze-focus-url'); }
+    if (input.type === 'keyDown' && (input.meta || input.control) && input.key.toLowerCase() === 'l') {
+      event.preventDefault(); view.ui.webContents.focus(); view.ui.webContents.send('doze-focus-url');
+    }
   });
+  // Keep the native callback from creation, before Puppeteer can acquire the Page.
   // This version-pinned internal handler is the only non-public Electron integration.
-  // Keep the native callback from creation, including before Puppeteer can acquire Page.
   if (wc.listenerCount('-run-dialog') !== 1) throw new Error('Unsupported Electron dialog implementation');
   wc.removeAllListeners('-run-dialog');
   wc.on('-run-dialog', (info, callback) => {
     entry.dialog = { callback, info: { id: randomUUID(), type: info.dialogType, message: info.messageText, defaultValue: info.defaultPromptText } };
     output({ event: 'dialog', page: id, dialog: entry.dialog.info.id, ...entry.dialog.info });
     refresh();
+    if (isShown(entry)) view.ui.webContents.focus();
   });
   wc.on('-cancel-dialogs', () => { if (entry.dialog) { const dialog = entry.dialog.info.id; entry.dialog = null; output({ event: 'answered', page: id, dialog }); refresh(); } });
   wc.setWindowOpenHandler(() => ({ action: 'allow', overrideBrowserWindowOptions: { show: false,
     webPreferences: { preload: join(__dirname, 'electron-prompt.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } },
     createWindow: options => {
+      const shown = isShown(entry);
       const child = make(randomUUID(), partition, id, options);
-      if (window.isVisible()) { window.hide(); child.window.show(); }
+      if (shown) select(child);
       return child.content.webContents;
     } }));
-  for (const event of ['did-navigate', 'did-navigate-in-page', 'page-title-updated', 'did-stop-loading']) wc.on(event, refresh);
-  wc.on('destroyed', () => {
-    for (const child of entries.values()) if (child.opener === id) child.content.webContents.close({ waitForBeforeUnload: false });
-    entries.delete(id);
-    output({ event: 'closed', page: id });
-    window.destroy();
+  wc.on('page-favicon-updated', (_event, icons) => {
+    entry.favicon = icons.find(icon => /^https?:\/\//i.test(icon) || /^data:image\//i.test(icon)) || '';
     refresh();
   });
-  window.on('close', event => { if (!quitting) { event.preventDefault(); window.hide(); } });
-  window.webContents.once('did-finish-load', refresh);
-  void window.loadURL(uiURL);
-  output({ event: 'created', entry: { id, opener, targetId: wc.getOrCreateDevToolsTargetId(), uiTargetId: window.webContents.getOrCreateDevToolsTargetId() } });
+  wc.on('did-navigate', () => { entry.favicon = ''; refresh(); });
+  for (const event of ['did-navigate-in-page', 'page-title-updated', 'did-stop-loading']) wc.on(event, refresh);
+  wc.on('destroyed', () => {
+    entries.delete(id);
+    if (view.tabs.includes(id)) hideTab(view, id);
+    for (const child of entries.values()) if (child.opener === id) child.content.webContents.close({ waitForBeforeUnload: false });
+    output({ event: 'closed', page: id });
+    if (![...entries.values()].some(e => e.view === view)) { views.delete(view.key); if (!view.window.isDestroyed()) view.window.destroy(); }
+    refresh();
+  });
+  output({ event: 'created', entry: { id, opener, targetId: wc.getOrCreateDevToolsTargetId(), uiTargetId: view.ui.webContents.getOrCreateDevToolsTargetId() } });
   return entry;
 }
 async function navigate(entry, url) { await entry.content.webContents.loadURL(url); }
@@ -109,18 +176,24 @@ function validateURL(value) {
   return url.href;
 }
 ipcMain.handle('doze-ui', async (event, action, args = {}) => {
-  const entry = [...entries.values()].find(e => e.window.webContents === event.sender && event.senderFrame === event.sender.mainFrame);
-  if (!entry) throw new Error('Invalid browser UI sender');
-  const wc = entry.content.webContents;
+  const view = [...views.values()].find(v => v.ui.webContents === event.sender && event.senderFrame === event.sender.mainFrame);
+  if (!view) throw new Error('Invalid browser UI sender');
+  const entry = entries.get(view.active);
+  const wc = entry?.content.webContents;
   switch (action) {
     case 'ready': refresh(); break;
-    case 'hide': entry.window.hide(); break;
-    case 'navigate': await navigate(entry, validateURL(args.url.includes('://') || args.url === 'about:blank' ? args.url : 'https://' + args.url)); break;
+    case 'close-window': view.window.close(); break;
+    case 'navigate': await navigate(entry, validateURL(args.url.includes('://') || args.url === 'about:blank' ? args.url : 'https://' + args.url)); wc.focus(); break;
     case 'back': if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': wc.reload(); break;
-    case 'switch': { const next = entries.get(args.page); if (!next || next.family !== entry.family) throw new Error('Unknown related page'); entry.window.hide(); next.window.show(); break; }
-    case 'answer': if (entry.dialog?.info.id !== args.dialog) throw new Error('Dialog is no longer open'); finishDialog(entry, !!args.accept, args.text); break;
+    case 'switch': {
+      const next = entries.get(args.page);
+      if (!next || next.view !== view || !view.tabs.includes(next.id)) throw new Error('Unknown shown page');
+      select(next); break;
+    }
+    case 'hide-tab': hideTab(view, args.page); break;
+    case 'answer': if (entry?.dialog?.info.id !== args.dialog) throw new Error('Dialog is no longer open'); finishDialog(entry, !!args.accept, args.text); break;
     default: throw new Error('Unknown browser UI action');
   }
 });
@@ -134,9 +207,9 @@ app.whenReady().then(async () => {
       message = JSON.parse(line);
       let result;
       switch (message.action) {
-        case 'open': { const entry = make(message.page, message.partition); await entry.content.webContents.loadURL('about:blank'); result = true; break; }
+        case 'open': { const entry = make(message.page, message.partition, undefined, {}, message.owner); await entry.content.webContents.loadURL('about:blank'); result = true; break; }
         case 'navigate': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); await navigate(entry, validateURL(message.url)); result = true; break; }
-        case 'show': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); entry.window.show(); refresh(); result = true; break; }
+        case 'show': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); select(entry, true); result = true; break; }
         case 'close': entries.get(message.page)?.content.webContents.close({ waitForBeforeUnload: false }); result = true; break;
         case 'answer': { const entry = entries.get(message.page); if (!entry || entry.dialog?.info.id !== message.dialog) throw new Error('Dialog is no longer open'); finishDialog(entry, !!message.accept, message.text); result = true; break; }
         case 'capture': {
@@ -149,10 +222,12 @@ app.whenReady().then(async () => {
             const image = await entry.content.webContents.capturePage();
             if (image.isEmpty()) throw new Error('Browser capture returned an empty image');
             result = image.resize({ width: Math.round(message.width * message.scale), height: Math.round(message.height * message.scale) }).toPNG().toString('base64');
-          } finally { if (!entry.window.isDestroyed()) entry.content.setBounds(bounds); }
+          } finally {
+            if (!entry.content.webContents.isDestroyed()) entry.content.setBounds(bounds);
+          }
           break;
         }
-        case 'list': result = [...entries.values()].map(e => ({ id: e.id, url: e.content.webContents.getURL(), title: e.content.webContents.getTitle(), visible: e.window.isVisible() })); break;
+        case 'list': result = [...entries.values()].map(e => ({ ...pageState(e), visible: isShown(e) })); break;
         case 'quit':
           quitting = true;
           for (const entry of entries.values()) entry.content.webContents.close({ waitForBeforeUnload: false });

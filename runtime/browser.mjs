@@ -138,7 +138,7 @@ export class BrowserManager {
       if (!group) { group = { pages: new Set(), partition: project ? 'persist:project' : 'temporary:' + randomUUID() }; engine.groups.set(root, group); }
       this.opening.set(id, { id, owner: caller.thread, connection: caller.connection, root, key, group });
       try {
-        await engine.request('open', { page: id, partition: group.partition }, signal);
+        await engine.request('open', { page: id, partition: group.partition, owner: caller.thread }, signal);
         signal?.throwIfAborted();
         if (!project && this.root(caller.thread) !== threadRoot) throw new Error('Caller parent changed while opening page');
         return this.pages.get(id);

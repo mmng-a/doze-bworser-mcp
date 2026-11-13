@@ -21,9 +21,11 @@ Each Git worktree root, or working folder outside Git, uses one dedicated Electr
 
 ## Joint viewing
 
-Use `headed: true` with `open_page`, or `show_page` for an existing page. The window provides a URL field, back/forward/reload, related-page switching and a hide button. Take turns with the user on the same page. Closing the window hides it and keeps the page alive. `close_page` closes the page and its child pages.
+Use `headed: true` with `open_page`, or `show_page` for an existing page. Pages with the same owner and storage partition share one window. A single 48px row contains back/forward/reload and tabs. The selected tab expands to show its title and domain; click it again or press Command+L (Ctrl+L on Linux) to edit its URL in place. Other tabs show favicons, with overflow available under “⋯”.
 
-Popups inherit the opener's owner and appear in `list_pages`. Hidden pages create hidden popups; popups opened during joint interaction are shown and the page selector can return to the opener. Respond to `alert`, `confirm` and `prompt` through MCP while hidden, or through the window's dialog while visible. `handle_dialog` accepts an optional `prompt_text`; omitting it uses the prompt's initial value.
+Take turns with the user on the same page. Closing the window, including the macOS red button, hides the window and preserves its pages. A tab’s × only removes it from the joint view; hiding the final tab hides the window. `show_page` restores the same live page. AI and system operations own page termination: `close_page` closes the page and its child pages.
+
+Popups inherit the opener's owner and appear in `list_pages`. Hidden pages create hidden popups; popups from the selected visible page appear as tabs in the same window, and the opener remains available as a tab. Respond to `alert`, `confirm` and `prompt` through MCP while hidden, or through the window's dialog while visible. `handle_dialog` accepts an optional `prompt_text`; omitting it uses the prompt's initial value.
 
 Site permission requests are denied while hidden and require confirmation in the joint UI when visible.
 
