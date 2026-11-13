@@ -23,6 +23,21 @@ Each Git worktree root, or working folder outside Git, uses one dedicated Electr
 
 Use `headed: true` with `open_page`, or `show_page` for an existing page. Pages with the same owner and storage partition share one window. A single 48px row contains back/forward/reload and tabs. The selected tab expands to show its title and domain; click it again or press Command+L (Ctrl+L on Linux) to edit its URL in place. Other tabs show favicons, with overflow available under “⋯”.
 
+The controls follow the OS light/dark setting with a monochrome palette. Inactive tabs have both a background and a border.
+
+| Action | macOS | Linux |
+| --- | --- | --- |
+| Edit URL | Command+L | Ctrl+L |
+| Shown tab 1–8 / last shown tab | Command+1–8 / Command+9 | Ctrl+1–8 / Ctrl+9 |
+| Next / previous shown tab | Control+Tab / Control+Shift+Tab, Command+Shift+] / Command+Shift+[ | Ctrl+Tab / Ctrl+Shift+Tab |
+| Back / forward | Command+[ / Command+], Command+Left / Command+Right | Ctrl+[ / Ctrl+], Alt+Left / Alt+Right |
+| Reload / reload ignoring cache | Command+R / Command+Shift+R | Ctrl+R / Ctrl+Shift+R, F5 / Shift+F5 |
+| Stop loading | Esc | Esc |
+| Zoom in / out / reset | Command++ / Command+− / Command+0 | Ctrl++ / Ctrl+− / Ctrl+0 |
+| Hide selected tab / window | Command+W / Command+Shift+W | Ctrl+W / Ctrl+Shift+W |
+
+Tab numbering and cycling include shown tabs in “⋯”, but exclude pages hidden with ×. While a dialog is open, browser shortcuts other than tab selection and hiding are suppressed; Esc responds to the dialog. Esc cancels URL editing while the address field is focused.
+
 Take turns with the user on the same page. Closing the window, including the macOS red button, hides the window and preserves its pages. A tab’s × only removes it from the joint view; hiding the final tab hides the window. `show_page` restores the same live page. AI and system operations own page termination: `close_page` closes the page and its child pages.
 
 Popups inherit the opener's owner and appear in `list_pages`. Hidden pages create hidden popups; popups from the selected visible page appear as tabs in the same window, and the opener remains available as a tab. Respond to `alert`, `confirm` and `prompt` through MCP while hidden, or through the window's dialog while visible. `handle_dialog` accepts an optional `prompt_text`; omitting it uses the prompt's initial value.

@@ -1,7 +1,8 @@
-const { app, BaseWindow, WebContentsView, ipcMain, session } = require('electron');
+const { app, BaseWindow, WebContentsView, ipcMain, session, nativeTheme } = require('electron');
 const { join } = require('node:path');
 const { randomUUID } = require('node:crypto');
 const readline = require('node:readline');
+const { browserShortcut } = require('./shortcuts.cjs');
 const { preserveSessionCookies } = require('./session-cookies.cjs');
 const { pathToFileURL } = require('node:url');
 const profile = process.env.DOZE_ELECTRON_PROFILE;
@@ -61,9 +62,37 @@ function hideTab(view, id) {
   if (!view.tabs.length) view.window.hide();
   refresh();
 }
+function installShortcuts(contents, view) {
+  contents.on('before-input-event', (event, input) => {
+    const shortcut = browserShortcut(input, process.platform);
+    if (!shortcut || !view.window.isVisible()) return;
+    const entry = entries.get(view.active);
+    const wc = entry?.content.webContents;
+    if (!wc || (contents !== wc && contents !== view.ui.webContents)) return;
+    if (shortcut.action !== 'stop') event.preventDefault();
+    const { action, value } = shortcut;
+    if (action === 'tab') {
+      const id = view.tabs[value === 9 ? view.tabs.length - 1 : value - 1];
+      if (id) select(entries.get(id));
+    } else if (action === 'cycle') {
+      const index = (view.tabs.indexOf(view.active) + value + view.tabs.length) % view.tabs.length;
+      select(entries.get(view.tabs[index]));
+    } else if (action === 'hide-tab') hideTab(view, entry.id);
+    else if (action === 'hide-window') view.window.hide();
+    else if (!entry.dialog) {
+      if (action === 'url') { view.ui.webContents.focus(); view.ui.webContents.send('doze-focus-url'); }
+      else if (action === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
+      else if (action === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
+      else if (action === 'reload') wc.reload();
+      else if (action === 'reload-fresh') wc.reloadIgnoringCache();
+      else if (action === 'stop' && contents !== view.ui.webContents) wc.stop();
+      else if (action === 'zoom') wc.setZoomLevel(value === 0 ? 0 : Math.max(-5, Math.min(5, wc.getZoomLevel() + value)));
+    }
+  });
+}
 function createView(key) {
   const window = new BaseWindow({ show: false, width: 1200, height: 900, minWidth: 520, minHeight: 380,
-    title: 'doze', backgroundColor: '#f5f7f4', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
+    title: 'doze', backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
   const ui = new WebContentsView({ webPreferences: { preload: join(__dirname, 'ui/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
   window.contentView.addChildView(ui);
   const view = { key, window, ui, tabs: [], active: null };
@@ -74,6 +103,7 @@ function createView(key) {
   });
   window.on('close', event => { if (!quitting) { event.preventDefault(); window.hide(); } });
   window.on('closed', () => { if (!ui.webContents.isDestroyed()) ui.webContents.close({ waitForBeforeUnload: false }); });
+  installShortcuts(ui.webContents, view);
   ui.webContents.once('did-finish-load', refresh);
   resizeUI(view);
   void ui.webContents.loadURL(uiURL);
@@ -128,11 +158,7 @@ function make(id, partition, opener, options = {}, owner) {
   content.setVisible(true);
   resize(entry);
   const wc = content.webContents;
-  wc.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && (input.meta || input.control) && input.key.toLowerCase() === 'l') {
-      event.preventDefault(); view.ui.webContents.focus(); view.ui.webContents.send('doze-focus-url');
-    }
-  });
+  installShortcuts(wc, view);
   // Keep the native callback from creation, before Puppeteer can acquire the Page.
   // This version-pinned internal handler is the only non-public Electron integration.
   if (wc.listenerCount('-run-dialog') !== 1) throw new Error('Unsupported Electron dialog implementation');
@@ -199,6 +225,9 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
     case 'answer': if (entry?.dialog?.info.id !== args.dialog) throw new Error('Dialog is no longer open'); finishDialog(entry, !!args.accept, args.text); break;
     default: throw new Error('Unknown browser UI action');
   }
+});
+nativeTheme.on('updated', () => {
+  for (const view of views.values()) view.window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5');
 });
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {

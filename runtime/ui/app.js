@@ -103,7 +103,7 @@ document.addEventListener('keydown', event => {
     if (state?.dialog) { event.preventDefault(); void answer(false); }
     else if (editingId) { event.preventDefault(); endEdit(); tabs.get(state.id)?.querySelector('.tab-select').focus(); }
   }
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); editURL(); }
+  if ((state?.mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'l') { event.preventDefault(); editURL(); }
 });
 window.doze.focusURL(editURL);
 new ResizeObserver(renderTabs).observe($('tabs'));

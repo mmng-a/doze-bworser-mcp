@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, chmod, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BrowserManager } from './browser.mjs';
 import { PendingDialog } from './controller.mjs';
 
 const enabled = !!process.env.DOZE_BROWSER_ELECTRON;
-async function setup(t) {
+async function setup(t, nativeKeys = false) {
   const folder = await mkdtemp(join(tmpdir(), 'doze electron 日本語 '));
   const server = createServer((req, res) => {
     if (req.url.startsWith('/favicon.svg')) {
@@ -21,7 +22,31 @@ async function setup(t) {
       (req.url === '/early' ? '<script>window.reply=prompt("初回の入力","初期値");window.done=true;</script>' : ''));
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
-  const manager = new BrowserManager({ electron_path: process.env.DOZE_BROWSER_ELECTRON, operation_timeout_seconds: 10 }, new Map(), join(folder, 'profiles'));
+  let executable = process.env.DOZE_BROWSER_ELECTRON;
+  if (nativeKeys) {
+    const main = fileURLToPath(new URL('./electron-main.cjs', import.meta.url));
+    const wrapper = join(folder, 'native-input.cjs');
+    const errorLog = join(folder, 'native-input-error.log');
+    t.after(async () => { try { t.diagnostic(await readFile(errorLog, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; } });
+    await writeFile(wrapper, `process.on('uncaughtException', error => { require('node:fs').appendFileSync(${JSON.stringify(errorLog)}, error.stack); process.exit(1); });
+const { app, webContents, nativeTheme } = require('electron');
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('console-message', (_event, _level, message) => {
+    if (message.startsWith('test-native-theme:')) nativeTheme.themeSource = message.slice(18);
+    if (message.startsWith('test-native-key:')) {
+      const { target, ...input } = JSON.parse(message.slice(16));
+      webContents.fromDevToolsTargetId(target).sendInputEvent(input);
+    }
+  });
+});
+require(${JSON.stringify(main)});`);
+    const launcher = join(folder, 'electron-test');
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    await writeFile(launcher, `#!/bin/sh\nexec ${quote(executable)} --remote-debugging-pipe ${quote(wrapper)}\n`);
+    await chmod(launcher, 0o700);
+    executable = launcher;
+  }
+  const manager = new BrowserManager({ electron_path: executable, operation_timeout_seconds: 10 }, new Map(), join(folder, 'profiles'));
   t.after(async () => { await manager.closeWhere(() => true); server.closeAllConnections(); await new Promise(r => server.close(r)); await rm(folder, { recursive: true, force: true }); });
   return { manager, caller: { thread: 'one', connection: 'one', cwd: folder }, url: 'http://127.0.0.1:' + server.address().port };
 }
@@ -252,4 +277,69 @@ test('Electron tabs: shown popup uses its opener window and hiding retains its n
   await manager.call(caller, 'show_page', { page_id: child.id });
   await manager.call(caller, 'close_page', first);
   assert.equal(manager.pages.size, 0);
+});
+
+test('Electron shortcuts: native input in sites and toolbar, hidden page retention, light and dark controls', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 45_000 }, async t => {
+  const { manager, caller, url } = await setup(t, true);
+  const pages = [];
+  for (let i = 0; i < 10; i++) pages.push(await manager.call(caller, 'open_page', { url: url + '/' + i, headed: true }));
+  const record = manager.pages.get(pages[0].page_id);
+  const ui = await record.engine.page({ targetId: record.entry.uiTargetId });
+  ui.setDefaultTimeout(5000);
+  const command = process.platform === 'darwin' ? 'meta' : 'control';
+  const key = async (page, keyCode, modifiers = [command]) => {
+    const session = await page.createCDPSession();
+    const { targetInfo } = await session.send('Target.getTargetInfo');
+    await session.detach();
+    await ui.evaluate(data => {
+      for (const type of ['keyDown', 'keyUp']) console.log('test-native-key:' + JSON.stringify({ ...data, type }));
+    }, { target: targetInfo.targetId, keyCode, modifiers });
+  };
+  const active = id => ui.waitForFunction(id => document.querySelector('.tab.active')?.dataset.page === id, {}, id);
+  await active(pages[9].page_id);
+  await key(manager.pages.get(pages[9].page_id).page, '1'); await active(pages[0].page_id);
+  await key(ui, '9'); await active(pages[9].page_id);
+  await key(ui, 'Tab', ['control']); await active(pages[0].page_id);
+  await key(ui, 'Tab', ['control', 'shift']); await active(pages[9].page_id);
+  await key(ui, '2'); await active(pages[1].page_id);
+  const site = manager.pages.get(pages[1].page_id).page;
+  await key(site, 'l'); await ui.waitForFunction(() => document.activeElement.id === 'url');
+  await key(ui, '1'); await active(pages[0].page_id);
+  await key(record.page, 'l'); await ui.waitForFunction(() => document.activeElement.id === 'url');
+  await ui.keyboard.press('Escape');
+  await record.page.evaluate(() => history.pushState({}, '', '/next'));
+  await key(record.page, '['); await record.page.waitForFunction(() => location.pathname === '/0');
+  await key(record.page, ']'); await record.page.waitForFunction(() => location.pathname === '/next');
+  await record.page.evaluate(() => window.marker = 'before-reload');
+  await key(record.page, 'r'); await record.page.waitForFunction(() => window.marker && marker !== 'before-reload');
+  await record.page.evaluate(() => window.marker = 'before-fresh-reload');
+  await key(ui, 'r', [command, 'shift']); await record.page.waitForFunction(() => window.marker && marker !== 'before-fresh-reload');
+  const width = await record.page.evaluate(() => innerWidth);
+  await key(ui, '='); await record.page.waitForFunction(width => innerWidth < width, {}, width);
+  await key(record.page, '0'); await record.page.waitForFunction(width => innerWidth === width, {}, width);
+  const marker = await record.page.evaluate(() => window.marker);
+  await key(ui, 'w'); await active(pages[1].page_id);
+  assert.equal(await record.page.evaluate(() => window.marker), marker);
+  assert.equal(manager.pages.size, 10);
+  await manager.call(caller, 'show_page', pages[0]); await active(pages[0].page_id);
+  for (const theme of ['light', 'dark']) {
+    await ui.evaluate(theme => console.log('test-native-theme:' + theme), theme);
+    await ui.waitForFunction(dark => matchMedia('(prefers-color-scheme: dark)').matches === dark, {}, theme === 'dark');
+    const palette = await ui.evaluate(() => {
+      const color = (selector, property) => getComputedStyle(document.querySelector(selector))[property];
+      return { background: color('html', 'backgroundColor'), text: color('html', 'color'), inactive: color('.tab:not(.active)', 'backgroundColor'), border: color('.tab:not(.active)', 'borderTopColor'), active: color('.tab.active', 'backgroundColor'), primary: color('.primary', 'backgroundColor') };
+    });
+    for (const color of Object.values(palette)) {
+      const channels = color.match(/\d+/g).slice(0, 3).map(Number);
+      assert.equal(channels[0], channels[1]); assert.equal(channels[1], channels[2]);
+    }
+    assert.notEqual(palette.inactive, palette.background);
+    assert.notEqual(palette.active, palette.inactive);
+    assert.notEqual(palette.border, palette.inactive);
+    assert.equal(palette.background, theme === 'dark' ? 'rgb(28, 28, 28)' : 'rgb(245, 245, 245)');
+    await ui.screenshot({ path: join(tmpdir(), `doze-tabs-${theme}.png`), clip: { x: 0, y: 0, width: 1200, height: 48 } });
+  }
+  await key(ui, 'w', [command, 'shift']);
+  await waitFor(async () => (await record.engine.request('list')).every(page => !page.visible));
+  assert.equal(manager.pages.size, 10);
 });
