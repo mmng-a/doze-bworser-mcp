@@ -89,6 +89,10 @@ function hideTab(view, id) {
   refresh();
 }
 function runShortcut(view, { action, value }) {
+  if (action === 'save-annotation') {
+    if (view.annotating && view.annotationDraft) view.ui.webContents.send('doze-save-annotation');
+    return;
+  }
   if (view.annotating) { stopAnnotations(view); refresh(); }
   const entry = entries.get(view.active);
   const wc = entry?.content.webContents;
@@ -115,6 +119,8 @@ function refreshStopMenu() {
   const view = [...views.values()].find(view => view.window === BaseWindow.getFocusedWindow());
   const entry = entries.get(view?.active);
   const stop = browserMenu?.getMenuItemById('stop');
+  const saveAnnotation = browserMenu?.getMenuItemById('save-annotation');
+  if (saveAnnotation) saveAnnotation.enabled = !!view?.annotating && !!view.annotationDraft;
   const contents = entry?.content.webContents;
   if (stop) stop.enabled = !!contents && !contents.isDestroyed() && !entry.dialog && contents.isFocused();
 }
@@ -129,6 +135,7 @@ function installMenuShortcuts() {
     ...(mac ? [{ role: 'appMenu' }] : []),
     { label: 'ファイル', submenu: [
       command('URLを開く…', 'CommandOrControl+L', { action: 'url' }),
+      command('注釈を保存', 'CommandOrControl+Enter', { action: 'save-annotation' }, { id: 'save-annotation', enabled: false }),
       { type: 'separator' },
       command('タブを隠す', 'CommandOrControl+W', { action: 'hide-tab' }),
       command('ウインドウを隠す', 'CommandOrControl+Shift+W', { action: 'hide-window' }),

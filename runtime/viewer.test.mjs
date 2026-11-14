@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BrowserManager } from './browser.mjs';
-import { PendingDialog } from './controller.mjs';
+import { PendingDialog, PageClosed } from './controller.mjs';
 
 const enabled = !!process.env.DOZE_BROWSER_ELECTRON;
 async function setup(t, nativeMenu = false, extensionFixture = false, privacyFixture = false) {
@@ -276,7 +276,7 @@ test('Electron joint UI: URL navigation, prompt entry and hiding retain live sta
 });
 
 test('Electron annotations: element and area comments, ownership, navigation and deletion', { skip: !enabled || !process.env.DOZE_TEST_VIEWER, timeout: 45_000 }, async t => {
-  const { manager, caller, url } = await setup(t);
+  const { manager, caller, url } = await setup(t, true);
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);
   await record.page.evaluate(() => { window.fixtureClicks = 0; document.querySelector('button').onclick = () => fixtureClicks++; });
@@ -289,10 +289,13 @@ test('Electron annotations: element and area comments, ownership, navigation and
   const rect = await record.page.$eval('button', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, width:r.width, height:r.height }; });
   await ui.mouse.click(rect.x + rect.width / 2, 48 + rect.y + rect.height / 2);
   await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
+  const popup = await ui.$eval('#annotation-panel', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, right:r.right, bottom:r.bottom }; });
+  assert.ok(Math.abs(popup.x - rect.x) < 2, 'editor is anchored beside the selected element');
+  assert.ok(popup.y >= 48 + rect.y + rect.height);
   assert.equal(await record.page.evaluate(() => fixtureClicks), 0, 'selection does not click the underlying page');
   const comment = '<script>synthetic</script> このボタンの余白を広げる';
   await ui.locator('#annotation-comment').fill(comment);
-  await ui.locator('#annotation-form button[type=submit]').click();
+  await ui.evaluate(target => console.log('test-native-menu:' + JSON.stringify({ target, accelerator: 'CommandOrControl+Enter' })), record.entry.uiTargetId);
   await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 1);
   assert.equal(await ui.$eval('#annotation-list', list => list.querySelectorAll('script').length), 0);
   const notes = await manager.call(caller, 'get_annotations', first);
@@ -321,6 +324,10 @@ test('Electron annotations: element and area comments, ownership, navigation and
   await ui.locator('#annotation-list li button').click();
   await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 1);
   assert.equal((await manager.call(caller, 'get_annotations', first)).length, 1);
+  await ui.mouse.move(1000, 750); await ui.mouse.down(); await ui.mouse.move(1180, 880); await ui.mouse.up();
+  await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
+  const edge = await ui.$eval('#annotation-panel', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, right:r.right, bottom:r.bottom, width:innerWidth, height:innerHeight }; });
+  assert.ok(edge.x >= 12 && edge.y >= 60 && edge.right <= edge.width - 12 && edge.bottom <= edge.height - 12, 'editor stays inside the window at the lower right corner');
 });
 
 test('Electron annotations: protected targets and input values cannot enter annotation context', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 30_000 }, async t => {
@@ -384,7 +391,10 @@ test('Electron: an authentication-style popup can message its opener and close i
   let child;
   for (let i = 0; i < 100; i++) { child = [...manager.pages.values()].find(p => p.entry.opener === first.page_id); if (child) break; await new Promise(r => setTimeout(r, 20)); }
   assert.ok(child);
-  await manager.call(caller, 'evaluate_script', { page_id: child.id, expression: "opener.postMessage('authorized',location.origin);setTimeout(()=>close(),0);'closing'" });
+  await manager.call(caller, 'evaluate_script', { page_id: child.id, expression: "opener.postMessage('authorized',location.origin);setTimeout(()=>close(),0);'closing'" }).catch(error => {
+    // Self-closing pages may disappear before the operation's final policy check.
+    assert.ok(error instanceof PageClosed, error.stack);
+  });
   for (let i = 0; i < 100 && manager.pages.has(child.id); i++) await new Promise(r => setTimeout(r, 20));
   assert.equal(await record.page.evaluate(() => window.authMessage), 'authorized');
   assert.equal(await record.page.evaluate(() => window.child.closed), true);

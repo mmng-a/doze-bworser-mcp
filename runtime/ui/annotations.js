@@ -30,6 +30,26 @@ function areaBetween(a, b) {
 function contentPoint(event) {
   return { x: Math.max(0, Math.min(innerWidth - 1, event.clientX)), y: Math.max(0, Math.min(innerHeight - 49, event.clientY - 48)) };
 }
+function positionAnnotationPanel() {
+  const panel = annotationElement('annotation-panel');
+  const draft = annotationState?.draft;
+  if (!draft) { panel.style.left = ''; panel.style.top = ''; panel.style.right = ''; return; }
+  const rect = Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * annotationState.zoom]));
+  const margin = 12;
+  const width = panel.offsetWidth;
+  const height = panel.offsetHeight;
+  const maxX = Math.max(margin, layer.clientWidth - width - margin);
+  const maxY = Math.max(margin, layer.clientHeight - height - margin);
+  let x = rect.x;
+  let y = rect.y + rect.height + margin;
+  if (y > maxY) y = rect.y - height - margin;
+  if (y < margin) {
+    x = rect.x + rect.width + margin;
+    if (x > maxX) x = rect.x - width - margin;
+    y = rect.y;
+  }
+  Object.assign(panel.style, { right: 'auto', left: Math.max(margin, Math.min(maxX, x)) + 'px', top: Math.max(margin, Math.min(maxY, y)) + 'px' });
+}
 annotationElement('annotate').onclick = () => annotationAction('annotation-toggle');
 annotationElement('annotation-close').onclick = () => annotationAction('annotation-toggle');
 annotationElement('annotation-cancel').onclick = () => annotationAction('annotation-cancel');
@@ -42,6 +62,13 @@ annotationElement('annotation-form').onsubmit = async event => {
   finally { event.submitter.disabled = false; annotationBusy = false; }
 };
 const layer = annotationElement('annotation-layer');
+window.doze.saveAnnotation(() => {
+  if (annotationState?.active && annotationState.draft && !annotationBusy) {
+    const form = annotationElement('annotation-form');
+    form.requestSubmit(form.querySelector('button[type="submit"]'));
+  }
+});
+new ResizeObserver(positionAnnotationPanel).observe(annotationElement('annotation-panel'));
 layer.addEventListener('wheel', event => { if (!event.target.closest('#annotation-panel')) event.preventDefault(); }, { passive: false });
 layer.onpointerdown = event => {
   if (event.button !== 0 || annotationBusy || event.target.closest('#annotation-panel')) return;
@@ -77,14 +104,17 @@ window.doze.subscribe(next => {
   document.documentElement.classList.toggle('annotating', active);
   annotationElement('annotate').disabled = !annotation?.available;
   annotationElement('annotate').setAttribute('aria-pressed', String(active));
+  annotationElement('annotation-form').querySelector('button[type="submit"]').title = next.mac ? '⌘Enterで保存' : 'Ctrl+Enterで保存';
   layer.hidden = !active;
   if (!active) { annotationDraft = null; annotationStart = null; selectionBox(null); return; }
   const draft = annotation.draft;
   annotationElement('annotation-form').hidden = !draft;
+  annotationElement('annotation-help').hidden = !!draft;
+  annotationElement('annotation-list').hidden = !!draft;
   selectionBox(draft ? Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * annotation.zoom])) : null);
   if (draft && annotationDraft !== draft.id) {
     annotationElement('annotation-comment').value = '';
-    annotationElement('annotation-comment').focus();
+    annotationElement('annotation-comment').focus({ preventScroll: true });
   }
   annotationDraft = draft?.id;
   const list = annotationElement('annotation-list');
@@ -105,4 +135,5 @@ window.doze.subscribe(next => {
     pin.style.top = ((note.rect.y + note.viewport.scrollY - annotation.viewport.scrollY) * annotation.zoom) + 'px';
     pins.append(pin);
   }
+  positionAnnotationPanel();
 });

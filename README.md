@@ -27,7 +27,7 @@ Shortcuts are registered through Electron menu accelerators. macOS uses applicat
 
 The controls follow the OS light/dark setting with a monochrome palette. Inactive tabs have both a background and a border.
 
-Use the pencil button at the right to enter annotation mode. Click an element or drag to select an area, then save a comment. Saved annotations appear as numbered pins and a list; use the × beside a comment to delete it. Selection gestures do not reach the underlying page. AI page operations pause during annotation mode, while `get_annotations` remains available. After adding comments, ask the assistant to read the annotations.
+Use the pencil button at the right to enter annotation mode. Click an element or drag to select an area, then enter a comment in the editor beside the selection. Save with the button or ⌘Enter (Ctrl+Enter on Linux). Saved annotations appear as numbered pins and a list; use the × beside a comment to delete it. Selection gestures do not reach the underlying page. AI page operations pause during annotation mode, while `get_annotations` remains available. After adding comments, ask the assistant to read the annotations.
 
 Annotations record comments, URLs, rectangles, element tags and selectors, viewport size, and scroll position. They do not automatically collect images or input values. Selecting protected password or 1Password content is refused, as is selecting or saving while a password is entered. Hiding a page preserves its annotations; closing the page or stopping the browser discards them. Navigation keeps earlier annotations available with `current: false` and hides their pins.
 
