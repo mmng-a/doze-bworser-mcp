@@ -67,7 +67,22 @@ html.annotating { background: transparent; }
 .adjust-grid .adjust-wide { grid-column: 1 / -1; }
 .adjust-grid input, .adjust-grid select, .adjust-grid textarea { width: 100%; height: 28px; min-width: 0; padding: 0 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--text); font: inherit; -webkit-app-region: no-drag; }
 .adjust-grid textarea { height: 54px; padding-top: 6px; resize: vertical; }
-.adjust-grid .adjust-color { border-left-width: 12px; }
+.adjust-control { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.adjust-control > input, .adjust-control > select, .adjust-control > textarea { flex: 1; min-width: 0; }
+.adjust-control > button { flex: 0 0 22px; min-width: 22px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 5px; }
+.adjust-color-swatch, .adjust-opacity-preview { position: relative; flex: 0 0 26px; width: 26px; height: 26px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 50%) 50% / 8px 8px; }
+.adjust-color-swatch > span, .adjust-opacity-preview > span { position: absolute; inset: 0; }
+.adjust-color-swatch .adjust-color-picker { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; opacity: 0; cursor: pointer; }
+.adjust-color-swatch:focus-within { outline: 2px solid var(--text); outline-offset: 1px; }
+.adjust-control input[type="range"] { flex: 1; width: auto; min-width: 60px; padding: 0; border: 0; background: transparent; accent-color: var(--text); cursor: pointer; }
+.adjust-control > .adjust-short { flex: 0 0 46px; width: 46px; text-align: center; }
+.adjust-opacity-preview > span { background: var(--text); }
+.adjust-radius-preview { flex: 0 0 22px; width: 22px; height: 22px; border: 1px solid var(--text); background: var(--hover); }
+.adjust-choice-control { display: block; }
+.adjust-choices { display: grid; grid-template-columns: repeat(var(--choice-columns), 1fr); gap: 4px; }
+.adjust-choices button { display: grid; place-items: center; min-width: 0; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; }
+.adjust-choices button[aria-pressed="true"] { color: var(--on-primary); background: var(--text); border-color: var(--text); }
+.adjust-choice-current { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
 #adjust-reset { margin-top: 8px; padding: 0 4px; font-size: 11px; color: var(--muted); }
 .box-model-margin { position: relative; height: 228px; border: 1px dashed var(--border); border-radius: 10px; background: var(--background); }
 .box-model-padding { position: absolute; inset: 34px 42px; border: 1px solid var(--border); border-radius: 7px; background: var(--tab); }

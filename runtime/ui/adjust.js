@@ -15,6 +15,8 @@ const adjustmentInputs = new Map();
 const adjustmentDirty = new Map();
 const adjustmentTimers = new Map();
 const adjustmentErrors = new Set();
+const adjustmentWidgets = new Map();
+const adjustmentQueued = new Set();
 let adjustmentQueue = Promise.resolve();
 let adjustmentRevision = 0;
 let adjustmentPending = 0;
@@ -42,6 +44,9 @@ function enqueueAdjustment(property) {
   const value = adjustmentDirty.get(property);
   const id = adjustmentDraftId;
   const revision = adjustmentRevision;
+  const queueKey = revision + ':' + property;
+  if (adjustmentQueued.has(queueKey)) return;
+  adjustmentQueued.add(queueKey);
   adjustmentPending++;
   adjustSaveState();
   adjustmentQueue = adjustmentQueue.then(async () => {
@@ -51,13 +56,15 @@ function enqueueAdjustment(property) {
     if (ok) adjustmentErrors.delete(property); else adjustmentErrors.add(property);
     if (ok && adjustmentDirty.get(property) === value) adjustmentDirty.delete(property);
   }).finally(() => {
+    adjustmentQueued.delete(queueKey);
     adjustmentPending--;
     adjustSaveState();
+    if (revision === adjustmentRevision && annotationState?.draft?.id === id && adjustmentDirty.has(property) && adjustmentDirty.get(property) !== value) enqueueAdjustment(property);
   });
 }
 async function flushAdjustments() {
   for (const property of [...adjustmentTimers.keys()]) enqueueAdjustment(property);
-  await adjustmentQueue;
+  for (;;) { const queue = adjustmentQueue; await queue; if (queue === adjustmentQueue) break; }
   return adjustmentErrors.size === 0;
 }
 function renderAdjust(draft) {
@@ -68,18 +75,106 @@ function renderAdjust(draft) {
   button.hidden = draft?.kind !== 'element';
   button.setAttribute('aria-expanded', String(adjustmentExpanded));
   document.getElementById('adjust-controls').hidden = !draft?.adjust || !adjustmentExpanded;
+  const display = adjustmentDirty.get('display') ?? draft?.adjust?.values.display ?? '';
+  const flex = display.includes('flex');
+  const layout = flex || display.includes('grid');
+  const vertical = flex && (adjustmentDirty.get('flex-direction') ?? draft?.adjust?.values['flex-direction'] ?? '').startsWith('column');
   for (const [key, input] of adjustmentInputs) {
     const value = key === 'text' ? draft?.adjust?.text : draft?.adjust?.values[key];
-    input.closest('label').hidden = key === 'text' && value == null;
+    input.closest('label').hidden = (key === 'text' && value == null) || (key === 'flex-direction' && !flex) || (['align-items','justify-content','gap'].includes(key) && !layout);
+    if (value != null) adjustmentWidgets.get(key)?.(adjustmentDirty.get(key) ?? value);
+    if (key === 'align-items' || key === 'justify-content') for (const icon of input.closest('label').querySelectorAll('svg')) icon.style.transform = vertical ? 'rotate(90deg)' : '';
     if (value == null || adjustmentDirty.has(key) || document.activeElement === input) continue;
     if (input instanceof HTMLSelectElement && ![...input.options].some(option => option.value === value)) input.add(new Option(value, value));
     input.value = input.closest('.box-model-margin') && /^-?[\d.]+px$/.test(value) ? String(Math.round(parseFloat(value) * 100) / 100) : value;
     if (input.closest('.box-model-margin')) input.title = value;
-    if (key === 'color' || key === 'background-color') input.style.borderLeftColor = CSS.supports('color', value) ? value : '';
   }
   adjustSaveState();
 }
 const adjustmentPanel = document.getElementById('adjust-controls');
+const choiceLabels = {
+  normal:'標準', bold:'太字', left:'左揃え', center:'中央', right:'右揃え', justify:'両端揃え', start:'開始位置', end:'終了位置',
+  block:'ブロック', inline:'インライン', 'inline-block':'インラインブロック', flex:'横並び', 'inline-flex':'インラインの横並び', grid:'グリッド', 'inline-grid':'インラインのグリッド',
+  row:'横方向', column:'縦方向', 'row-reverse':'横方向を反転', 'column-reverse':'縦方向を反転',
+  stretch:'引き伸ばす', baseline:'文字の基準線', 'flex-start':'先頭', 'flex-end':'末尾',
+  'space-between':'両端に広げる', 'space-around':'周囲に同じ余白', 'space-evenly':'すべて同じ間隔',
+};
+function choiceIcon(property, value) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [name, content] of Object.entries({viewBox:'0 0 24 24', width:'20', height:'20', fill:'none', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round', 'aria-hidden':'true'})) svg.setAttribute(name, content);
+  const shape = (tag, attrs) => { const node = document.createElementNS(svg.namespaceURI, tag); for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value); svg.append(node); };
+  if (property === 'text-align') {
+    const offset = value === 'center' ? 3 : ['right', 'end'].includes(value) ? 6 : 0;
+    shape('path', {d:`M4 5h16M${4+offset} 10h${value==='justify'?16:10}M4 15h16M${4+offset} 20h${value==='justify'?16:10}`});
+    if (['start','end'].includes(value)) shape('path', {d:value==='start'?'m6 8-2 2 2 2':'m18 8 2 2-2 2'});
+  } else if (property === 'flex-direction') {
+    shape('path', {d:value==='row'?'M4 12h16m-4-4 4 4-4 4':value==='row-reverse'?'M20 12H4m4-4-4 4 4 4':value==='column'?'M12 4v16m-4-4 4 4 4-4':'M12 20V4m-4 4 4-4 4 4'});
+  } else if (property === 'display') {
+    const grid = value.includes('grid'); const horizontal = value.includes('flex');
+    if (value.includes('inline')) { shape('path', {d:'M2 20h20'}); svg.setAttribute('stroke-dasharray','2 2'); }
+    for (let i=0;i<(grid?4:3);i++) shape('rect', {x:grid?4+(i%2)*9:horizontal?3+i*7:4,y:grid?4+Math.floor(i/2)*9:horizontal?6:3+i*7,width:grid?6:horizontal?4:16,height:grid?6:horizontal?12:4,rx:1});
+  } else {
+    const vertical = property === 'align-items';
+    shape('path', {d:vertical?'M3 3h18M3 21h18':'M3 3v18M21 3v18'});
+    const centered = ['normal','center','space-around','space-evenly'].includes(value);
+    const end = ['end','flex-end'].includes(value);
+    for (let i=0;i<3;i++) {
+      const size = vertical ? (value==='stretch'?14:5+i*3) : 3;
+      const position = value==='space-between'?4+i*6:value==='space-evenly'?5+i*5:value==='space-around'?4+i*6:end?10+i*3:centered?6+i*4:4+i*3;
+      shape('rect', {x:vertical?5+i*5:position,y:vertical?(end?20-size:centered?12-size/2:value==='baseline'?17-size:4):7,width:vertical?3:size,height:vertical?size:10,rx:.5});
+    }
+    if (value==='baseline') shape('path',{d:'M4 18h16'});
+  }
+  return svg;
+}
+const colorCanvas = document.createElement('canvas'); colorCanvas.width = colorCanvas.height = 1;
+const colorContext = colorCanvas.getContext('2d', {willReadFrequently:true});
+function enhanceAdjustment(input, key, kind, label) {
+  const control = document.createElement('div'); control.className = 'adjust-control';
+  const set = value => { input.value = value; adjustmentWidgets.get(key)?.(value); input.dispatchEvent(new Event('input', {bubbles:true})); input.dispatchEvent(new Event('change', {bubbles:true})); };
+  if (kind === 'color') {
+    const picker = document.createElement('input'); picker.type = 'color'; picker.className = 'adjust-color-picker'; picker.setAttribute('aria-label', label + 'を選択');
+    const swatch=document.createElement('span');swatch.className='adjust-color-swatch';
+    const ink=document.createElement('span');ink.setAttribute('aria-hidden','true');swatch.append(ink,picker);
+    picker.oninput = () => set(picker.value);
+    control.append(swatch, input);
+    adjustmentWidgets.set(key, value => {
+      if (!CSS.supports('color', value)) return;
+      colorContext.clearRect(0,0,1,1); colorContext.fillStyle = value; colorContext.fillRect(0,0,1,1);
+      const [r,g,b] = colorContext.getImageData(0,0,1,1).data;
+      picker.value = '#' + [r,g,b].map(value => value.toString(16).padStart(2,'0')).join('');
+      ink.style.backgroundColor=value;
+    });
+  } else if (key === 'opacity') {
+    const slider = document.createElement('input'); slider.type='range'; slider.min=0; slider.max=100; slider.step=1; slider.setAttribute('aria-label','不透明度を調整');
+    slider.oninput=()=>set(String(Number(slider.value)/100));
+    const preview = document.createElement('span'); preview.className='adjust-opacity-preview'; preview.setAttribute('aria-hidden','true');
+    const ink = document.createElement('span'); preview.append(ink);
+    input.classList.add('adjust-short'); control.append(preview, slider, input);
+    adjustmentWidgets.set(key,value=>{if(Number.isFinite(Number(value))){slider.value=Number(value)*100;ink.style.opacity=value;slider.setAttribute('aria-valuetext',Math.round(Number(value)*100)+'%');}});
+  } else if (['text-align','display','flex-direction','align-items','justify-content'].includes(key)) {
+    const buttons=document.createElement('div'); buttons.className='adjust-choices'; buttons.style.setProperty('--choice-columns',key==='text-align'?6:key==='flex-direction'?4: key==='display'?4:5);
+    buttons.setAttribute('role','group'); buttons.setAttribute('aria-label',label); input.hidden=true;
+    const choices=[];
+    for(const value of kind){const button=document.createElement('button');button.type='button';button.title=choiceLabels[value]||value;button.setAttribute('aria-label',button.title);button.append(choiceIcon(key,value));button.onclick=event=>{event.preventDefault();set(value);};buttons.append(button);choices.push([value,button]);}
+    const current=document.createElement('span');current.className='adjust-choice-current';
+    control.classList.add('adjust-choice-control');control.append(buttons,current,input);
+    adjustmentWidgets.set(key,value=>{for(const [option,button] of choices)button.setAttribute('aria-pressed',String(option===value));current.textContent=choiceLabels[value]||value;});
+  } else if (key === 'font-family') {
+    const list=document.createElement('datalist');list.id='adjust-font-families';
+    for(const font of ['system-ui','Arial','Helvetica Neue','Georgia','Times New Roman','ui-monospace, monospace']){const option=document.createElement('option');option.value=font;option.label=font==='system-ui'?'システム標準':font.includes('monospace')?'等幅':font;list.append(option);}
+    input.setAttribute('list',list.id);control.append(input,list);
+    adjustmentWidgets.set(key,value=>input.style.fontFamily=value);
+  } else if (key === 'font-size' || key === 'border-radius') {
+    const minus=document.createElement('button');const plus=document.createElement('button');
+    minus.type=plus.type='button';minus.textContent='−';plus.textContent='+';minus.setAttribute('aria-label',label+'を小さく');plus.setAttribute('aria-label',label+'を大きく');
+    const nudge=delta=>{const match=input.value.match(/^(-?[\d.]+)(px|em|rem|%|vw|vh)?$/);if(match)set(Math.max(0,Math.round((Number(match[1])+delta)*100)/100)+(match[2]||'px'));};
+    minus.onclick=event=>{event.preventDefault();nudge(-1);};plus.onclick=event=>{event.preventDefault();nudge(1);};
+    control.append(minus,input,plus);
+    if(key==='border-radius'){const preview=document.createElement('span');preview.className='adjust-radius-preview';preview.setAttribute('aria-hidden','true');control.prepend(preview);adjustmentWidgets.set(key,value=>preview.style.borderRadius=value);}
+  } else control.append(input);
+  return control;
+}
 for (const [title, fields] of [adjustmentGroups[2], ...adjustmentGroups.filter((_, index) => index !== 2)]) {
   const spacing = title === 'サイズ・余白';
   const group = document.createElement('details'); group.open = spacing || title === '文字'; group.dataset.adjustGroup = title;
@@ -102,10 +197,13 @@ for (const [title, fields] of [adjustmentGroups[2], ...adjustmentGroups.filter((
     const label = document.createElement('label'); const caption = document.createElement('span'); caption.textContent = title;
     const input = document.createElement(Array.isArray(kind) ? 'select' : kind === 'text' ? 'textarea' : 'input');
     input.id = 'adjust-' + key; input.name = key;
-    if (Array.isArray(kind)) for (const value of kind) input.add(new Option(value, value));
+    input.setAttribute('aria-label',title);
+    if (Array.isArray(kind)) for (const value of kind) {
+      const weight = {'100':'極細','200':'細字','300':'細字','400':'標準','500':'中太','600':'やや太字','700':'太字','800':'極太','900':'極太'};
+      const option=new Option(key==='font-weight'?`${weight[value]||choiceLabels[value]||value}${weight[value]?' '+value:''}`:choiceLabels[value]||value,value);if(key==='font-weight')option.style.fontWeight=value;input.add(option);
+    }
     else { input.maxLength = kind === 'text' ? 4000 : 200; if (kind === 'length') input.placeholder = 'px'; }
-    if (kind === 'text' || key === 'font-family') label.className = 'adjust-wide';
-    if (kind === 'color') input.className = 'adjust-color';
+    if (kind === 'text' || key === 'font-family' || ['text-align','display','flex-direction','align-items','justify-content','opacity'].includes(key)) label.className = 'adjust-wide';
     input.oninput = () => {
       let value = input.value;
       if (kind === 'length' && /^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(value)) value += 'px';
@@ -114,7 +212,7 @@ for (const [title, fields] of [adjustmentGroups[2], ...adjustmentGroups.filter((
       adjustmentTimers.set(key, setTimeout(() => enqueueAdjustment(key), 180));
     };
     input.onchange = () => { if (adjustmentDirty.has(key)) enqueueAdjustment(key); };
-    label.append(caption, input);
+    label.append(caption, spacing ? input : enhanceAdjustment(input,key,kind,title));
     if (spacing && /^(margin|padding)-/.test(key)) {
       label.className = 'box-side box-' + key.split('-')[1]; label.title = title;
       (key.startsWith('margin-') ? margin : padding).append(label);
