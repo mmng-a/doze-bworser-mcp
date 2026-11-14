@@ -287,6 +287,10 @@ test('Electron annotations: element and area comments, ownership, navigation and
   await ui.waitForFunction(() => !document.getElementById('annotation-layer').hidden);
   assert.equal(await ui.$eval('html', element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
   const rect = await record.page.$eval('button', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, width:r.width, height:r.height }; });
+  await ui.mouse.move(rect.x + rect.width / 2, 48 + rect.y + rect.height / 2);
+  await ui.waitForFunction(() => !document.getElementById('annotation-hover').hidden);
+  assert.equal(await ui.$eval('#annotation-hover span', element => element.textContent), 'button');
+  assert.equal(await ui.$eval('#annotation-form', element => element.hidden), true);
   await ui.mouse.click(rect.x + rect.width / 2, 48 + rect.y + rect.height / 2);
   await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
   const popup = await ui.$eval('#annotation-panel', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, right:r.right, bottom:r.bottom }; });
@@ -302,6 +306,17 @@ test('Electron annotations: element and area comments, ownership, navigation and
   assert.equal(notes.length, 1); assert.equal(notes[0].comment, comment); assert.equal(notes[0].target.tag, 'button');
   assert.equal(notes[0].current, true); assert.equal(notes[0].kind, 'element');
   assert.equal('backendNodeId' in notes[0], false); assert.equal('image' in notes[0], false);
+  await ui.hover('.annotation-pin');
+  await ui.waitForFunction(() => !document.getElementById('annotation-preview').hidden);
+  assert.equal(await ui.$eval('#annotation-preview', element => element.textContent), comment);
+  await ui.locator('.annotation-pin').click();
+  await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
+  assert.equal(await ui.$eval('#annotation-comment', element => element.value), comment);
+  await ui.locator('#annotation-comment').fill('更新したコメント');
+  await ui.locator('#annotation-form button[type=submit]').click();
+  await ui.waitForFunction(() => document.getElementById('annotation-list').textContent.includes('更新したコメント'));
+  const edited = await manager.call(caller, 'get_annotations', first);
+  assert.equal(edited.length, 1); assert.equal(edited[0].id, notes[0].id); assert.equal(edited[0].comment, '更新したコメント');
   await assert.rejects(manager.call({ thread:'other' }, 'get_annotations', first), /Page is closed/);
   await assert.rejects(manager.call(caller, 'inspect_page', first), /adding annotations/);
   const other = await manager.call(caller, 'open_page', { url });

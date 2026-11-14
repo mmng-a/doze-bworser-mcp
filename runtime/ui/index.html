@@ -33,11 +33,14 @@
 <main>
   <section id="annotation-layer" aria-label="注釈の選択" hidden>
     <div id="annotation-pins"></div>
+    <div id="annotation-hover" hidden><span></span></div>
+    <div id="annotation-preview" hidden></div>
     <div id="annotation-selection" hidden></div>
     <aside id="annotation-panel">
       <div class="annotation-heading"><strong>注釈</strong><button id="annotation-close" aria-label="注釈を終了">×</button></div>
       <p id="annotation-help">要素をクリック、またはドラッグで範囲を選択</p>
       <form id="annotation-form" hidden>
+        <div class="annotation-target-row"><span id="annotation-target"></span><button id="annotation-delete" type="button" aria-label="この注釈を削除" title="注釈を削除" hidden>削除</button></div>
         <label class="sr-only" for="annotation-comment">コメント</label>
         <textarea id="annotation-comment" placeholder="この場所へのコメント" maxlength="4000" required></textarea>
         <div class="actions"><button id="annotation-cancel" type="button">キャンセル</button><button class="primary" type="submit">保存</button></div>

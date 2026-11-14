@@ -3,6 +3,38 @@ let annotationState;
 let annotationDraft;
 let annotationStart;
 let annotationBusy = false;
+let hoverTimer;
+let hoverPoint;
+let hoverSequence = 0;
+let hoverTask = Promise.resolve();
+let hoverBusy = false;
+
+function clearAnnotationHover() {
+  hoverSequence++;
+  clearTimeout(hoverTimer); hoverTimer = null; hoverPoint = null;
+  annotationElement('annotation-hover').hidden = true;
+}
+function queueAnnotationHover(point) {
+  hoverPoint = point;
+  if (hoverTimer || hoverBusy) return;
+  hoverTimer = setTimeout(() => {
+    hoverTimer = null;
+    const point = hoverPoint;
+    const sequence = hoverSequence;
+    if (!point || !annotationState?.active || annotationState.draft || annotationStart || annotationBusy) return;
+    hoverBusy = true;
+    hoverTask = window.doze.act('annotation-hover', point).then(result => {
+      if (sequence !== hoverSequence || annotationState?.draft || !annotationState?.active) return;
+      const box = annotationElement('annotation-hover');
+      Object.assign(box.style, Object.fromEntries(Object.entries(result.rect).map(([key, value]) => [({x:'left',y:'top'})[key] || key, value * result.zoom + 'px'])));
+      box.querySelector('span').textContent = result.tag;
+      box.hidden = false;
+    }).catch(() => { annotationElement('annotation-hover').hidden = true; }).finally(() => {
+      hoverBusy = false;
+      if (hoverPoint && hoverPoint !== point) queueAnnotationHover(hoverPoint);
+    });
+  }, 80);
+}
 
 async function annotationAction(action, args) {
   try {
@@ -51,8 +83,9 @@ function positionAnnotationPanel() {
   Object.assign(panel.style, { right: 'auto', left: Math.max(margin, Math.min(maxX, x)) + 'px', top: Math.max(margin, Math.min(maxY, y)) + 'px' });
 }
 annotationElement('annotate').onclick = () => annotationAction('annotation-toggle');
-annotationElement('annotation-close').onclick = () => annotationAction('annotation-toggle');
+annotationElement('annotation-close').onclick = () => annotationAction(annotationState?.draft ? 'annotation-cancel' : 'annotation-toggle');
 annotationElement('annotation-cancel').onclick = () => annotationAction('annotation-cancel');
+annotationElement('annotation-delete').onclick = () => annotationAction('annotation-delete', { id: annotationState?.draft?.editId });
 annotationElement('annotation-form').onsubmit = async event => {
   event.preventDefault();
   if (annotationBusy) return;
@@ -71,14 +104,19 @@ window.doze.saveAnnotation(() => {
 new ResizeObserver(positionAnnotationPanel).observe(annotationElement('annotation-panel'));
 layer.addEventListener('wheel', event => { if (!event.target.closest('#annotation-panel')) event.preventDefault(); }, { passive: false });
 layer.onpointerdown = event => {
-  if (event.button !== 0 || annotationBusy || event.target.closest('#annotation-panel')) return;
+  if (event.button !== 0 || annotationBusy || event.target.closest('#annotation-panel, .annotation-pin')) return;
+  if (annotationState?.draft && annotationElement('annotation-comment').value.trim()) { annotationElement('annotation-comment').focus(); return; }
+  clearAnnotationHover();
   annotationStart = contentPoint(event);
   layer.setPointerCapture(event.pointerId);
   selectionBox(null);
 };
 layer.onpointermove = event => {
   if (annotationStart) selectionBox(areaBetween(annotationStart, contentPoint(event)));
+  else if (!event.target.closest('#annotation-panel, .annotation-pin') && !annotationState?.draft) queueAnnotationHover(contentPoint(event));
+  else clearAnnotationHover();
 };
+layer.onpointerleave = clearAnnotationHover;
 layer.onpointercancel = () => { annotationStart = null; selectionBox(null); };
 layer.onpointerup = async event => {
   if (!annotationStart) return;
@@ -89,6 +127,7 @@ layer.onpointerup = async event => {
   annotationBusy = true;
   const area = Math.hypot(rect.width, rect.height) >= 6;
   try {
+    await hoverTask;
     if (!await annotationAction('annotation-select', area ? { kind: 'area', ...rect } : { kind: 'element', ...start, width: 0, height: 0 })) selectionBox(null);
   } finally { annotationBusy = false; }
 };
@@ -106,16 +145,20 @@ window.doze.subscribe(next => {
   annotationElement('annotate').setAttribute('aria-pressed', String(active));
   annotationElement('annotation-form').querySelector('button[type="submit"]').title = next.mac ? '⌘Enterで保存' : 'Ctrl+Enterで保存';
   layer.hidden = !active;
-  if (!active) { annotationDraft = null; annotationStart = null; selectionBox(null); return; }
+  annotationElement('annotation-preview').hidden = true;
+  if (!active) { annotationDraft = null; annotationStart = null; clearAnnotationHover(); selectionBox(null); return; }
   const draft = annotation.draft;
+  if (draft) clearAnnotationHover();
   annotationElement('annotation-form').hidden = !draft;
   annotationElement('annotation-help').hidden = !!draft;
   annotationElement('annotation-list').hidden = !!draft;
   selectionBox(draft ? Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * annotation.zoom])) : null);
   if (draft && annotationDraft !== draft.id) {
-    annotationElement('annotation-comment').value = '';
+    annotationElement('annotation-comment').value = draft.comment || '';
     annotationElement('annotation-comment').focus({ preventScroll: true });
   }
+  annotationElement('annotation-target').textContent = draft?.target?.tag || '範囲';
+  annotationElement('annotation-delete').hidden = !draft?.editId;
   annotationDraft = draft?.id;
   const list = annotationElement('annotation-list');
   const pins = annotationElement('annotation-pins');
@@ -126,13 +169,30 @@ window.doze.subscribe(next => {
     const remove = document.createElement('button');
     remove.type = 'button'; remove.textContent = '×'; remove.title = '注釈を削除'; remove.setAttribute('aria-label', `${index + 1}番の注釈を削除`);
     remove.onclick = () => annotationAction('annotation-delete', { id: note.id });
-    item.append(remove, document.createTextNode(note.comment));
+    const edit = () => {
+      clearAnnotationHover();
+      if (annotationState?.draft && annotationElement('annotation-comment').value.trim()) { annotationElement('annotation-comment').focus(); return; }
+      void annotationAction('annotation-edit', { id: note.id });
+    };
+    if (note.current) {
+      const comment = document.createElement('button'); comment.type = 'button'; comment.className = 'annotation-note'; comment.textContent = note.comment; comment.title = '注釈を編集'; comment.onclick = edit;
+      item.append(remove, comment);
+    } else item.append(remove, document.createTextNode(note.comment));
     if (!note.current) { const previous = document.createElement('small'); previous.textContent = '（以前のページ）'; item.append(previous); }
     list.append(item);
     if (!note.current || note.viewport.width !== annotation.viewport?.width || note.viewport.height !== annotation.viewport?.height) continue;
-    const pin = document.createElement('span'); pin.className = 'annotation-pin'; pin.textContent = String(index + 1);
+    const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'annotation-pin'; pin.textContent = String(index + 1); pin.setAttribute('aria-label', `${index + 1}番の注釈を編集`); pin.onclick = edit;
     pin.style.left = ((note.rect.x + note.viewport.scrollX - annotation.viewport.scrollX) * annotation.zoom) + 'px';
     pin.style.top = ((note.rect.y + note.viewport.scrollY - annotation.viewport.scrollY) * annotation.zoom) + 'px';
+    pin.onpointerenter = () => {
+      if (annotationState?.draft) return;
+      clearAnnotationHover();
+      const preview = annotationElement('annotation-preview'); preview.textContent = note.comment; preview.hidden = false;
+      const x = parseFloat(pin.style.left) + 32;
+      const y = parseFloat(pin.style.top);
+      Object.assign(preview.style, { left: Math.max(12, Math.min(layer.clientWidth - preview.offsetWidth - 12, x)) + 'px', top: Math.max(12, Math.min(layer.clientHeight - preview.offsetHeight - 12, y)) + 'px' });
+    };
+    pin.onpointerleave = () => { annotationElement('annotation-preview').hidden = true; };
     pins.append(pin);
   }
   positionAnnotationPanel();

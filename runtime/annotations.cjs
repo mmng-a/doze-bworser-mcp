@@ -80,7 +80,7 @@ async function selectAnnotation(entry, selection) {
     document: entry.document, url: wc.getURL(), viewport: { width: limit.width, height: limit.height, scrollX: viewport.pageX, scrollY: viewport.pageY }, zoom };
 }
 function publicAnnotation(note, entry) {
-  const { frameId, backendNodeId, document, zoom, ...result } = note;
+  const { frameId, backendNodeId, document, zoom, editId, ...result } = note;
   return { ...result, current: document === entry.document && note.url === entry.content.webContents.getURL() };
 }
 module.exports = { selectAnnotation, publicAnnotation };

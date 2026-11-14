@@ -39,7 +39,7 @@ function state(view) {
     back: wc?.navigationHistory.canGoBack() || false, forward: wc?.navigationHistory.canGoForward() || false, dialog: entry?.dialog?.info,
     onePassword: entry?.partition === 'persist:project' ? { ...onePassword.state, tabId: wc.id } : null,
     annotation: { active: !!view.annotating, available: !!entry && !entry.userOnly && !entry.dialog,
-      draft: view.annotationDraft ? publicAnnotation(view.annotationDraft, entry) : null,
+      draft: view.annotationDraft ? { ...publicAnnotation(view.annotationDraft, entry), editId: view.annotationDraft.editId } : null,
       zoom: wc?.getZoomFactor() || 1, viewport: view.annotationViewport,
       notes: view.annotating && entry ? entry.annotations.map(note => publicAnnotation(note, entry)) : [] },
     pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
@@ -340,6 +340,29 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
       if (view.annotationToken !== token || view.active !== entry.id || !isShown(entry)) break;
       view.ui.webContents.focus(); refresh(); break;
     }
+    case 'annotation-hover': {
+      if (!entry || !view.annotating || view.annotationDraft || entry.userOnly || !isShown(entry)) throw privacyError();
+      const token = view.annotationToken;
+      const draft = await selectAnnotation(entry, { kind: 'element', x: args.x, y: args.y, width: 0, height: 0 });
+      if (view.annotationToken !== token || view.active !== entry.id || view.annotationDraft) throw new Error('The page changed.');
+      return { rect: draft.rect, tag: draft.target.tag, zoom: draft.zoom };
+    }
+    case 'annotation-edit': {
+      if (!entry || !view.annotating || entry.userOnly || !isShown(entry)) throw privacyError();
+      const note = entry.annotations.find(note => note.id === args.id);
+      if (!note || !publicAnnotation(note, entry).current) throw new Error('The page changed. Select the target again.');
+      const token = view.annotationToken;
+      let selection = note;
+      if (note.kind === 'area') {
+        const { cssLayoutViewport } = await entry.privacy.send('Page.getLayoutMetrics');
+        const rect = { ...note.rect, x: note.rect.x + note.viewport.scrollX - cssLayoutViewport.pageX, y: note.rect.y + note.viewport.scrollY - cssLayoutViewport.pageY };
+        selection = { kind: 'area', ...Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * wc.getZoomFactor()])) };
+      }
+      const selected = await selectAnnotation(entry, selection);
+      if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed.');
+      view.annotationDraft = { ...selected, comment: note.comment, editId: note.id };
+      refresh(); break;
+    }
     case 'annotation-select': {
       if (!entry || !view.annotating || entry.userOnly || !isShown(entry)) throw privacyError();
       const token = view.annotationToken;
@@ -358,12 +381,18 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
       const token = view.annotationToken;
       const selected = await selectAnnotation(entry, draft.kind === 'element' ? draft : { kind: 'area', ...Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * draft.zoom])) });
       if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed. Select the target again.');
-      entry.annotations.push({ ...selected, comment: args.comment.trim() });
+      const note = { ...selected, comment: args.comment.trim() };
+      if (draft.editId) {
+        const index = entry.annotations.findIndex(note => note.id === draft.editId);
+        if (index === -1) throw new Error('Select the annotation target again.');
+        entry.annotations[index] = { ...note, id: draft.editId };
+      } else entry.annotations.push(note);
       view.annotationDraft = null;
       refresh(); break;
     }
     case 'annotation-delete':
       if (!entry || !view.annotating || entry.userOnly) throw privacyError();
+      if (view.annotationDraft?.editId === args.id) view.annotationDraft = null;
       entry.annotations = entry.annotations.filter(note => note.id !== args.id); refresh(); break;
     case 'ready': refresh(); break;
     case 'close-window': view.window.close(); break;
