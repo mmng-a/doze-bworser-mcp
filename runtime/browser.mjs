@@ -217,7 +217,7 @@ export class BrowserManager {
     try { result = await this.operate(record, name, args); }
     catch (error) { failed = true; failure = error; }
     const after = await record.engine.request('policy', { page: record.id, operation: name === 'evaluate_script' ? 'check' : name,
-      ...(['inspect_page', 'take_screenshot'].includes(name) && policy.enabled ? { version: policy.version } : {}) });
+      ...(['inspect_page', 'take_screenshot', 'get_annotations'].includes(name) && policy.enabled ? { version: policy.version } : {}) });
     if (after.enabled && !policy.enabled) {
       record.controller.nodes.clear();
       throw new Error('1Password protection was enabled during this operation. No content was returned; inspect the page again.');
@@ -235,6 +235,7 @@ export class BrowserManager {
         await record.engine.request('navigate', { page: record.id, url: args.url });
         break;
       case 'inspect_page': return inspect(controller);
+      case 'get_annotations': return record.engine.request('annotations', { page: record.id });
       case 'click':
       case 'fill': {
         const node = controller.nodes.get(args.element);

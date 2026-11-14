@@ -7,6 +7,7 @@ const { OnePassword, extensionId } = require('./one-password.cjs');
 const { pathToFileURL } = require('node:url');
 const { readFile, writeFile } = require('node:fs/promises');
 const { isUserOnlyURL, privacyError, PagePrivacy } = require('./privacy.cjs');
+const { selectAnnotation, publicAnnotation } = require('./annotations.cjs');
 const profile = process.env.DOZE_ELECTRON_PROFILE;
 if (!profile) throw new Error('Missing private browser profile');
 app.setPath('userData', profile);
@@ -37,12 +38,17 @@ function state(view) {
   return { id: entry?.id, mac: process.platform === 'darwin', url: wc?.getURL() || '', origin,
     back: wc?.navigationHistory.canGoBack() || false, forward: wc?.navigationHistory.canGoForward() || false, dialog: entry?.dialog?.info,
     onePassword: entry?.partition === 'persist:project' ? { ...onePassword.state, tabId: wc.id } : null,
+    annotation: { active: !!view.annotating, available: !!entry && !entry.userOnly && !entry.dialog,
+      draft: view.annotationDraft ? publicAnnotation(view.annotationDraft, entry) : null,
+      zoom: wc?.getZoomFactor() || 1, viewport: view.annotationViewport,
+      notes: view.annotating && entry ? entry.annotations.map(note => publicAnnotation(note, entry)) : [] },
     pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
 }
 function refresh() {
   if (quitting) return;
   refreshStopMenu();
   for (const view of views.values()) if (!view.window.isDestroyed()) {
+    if (entries.get(view.active)?.dialog) stopAnnotations(view);
     for (const entry of entries.values()) if (entry.view === view && !entry.content.webContents.isDestroyed()) {
       entry.visible = view.active === entry.id && !entry.dialog;
 
@@ -53,6 +59,7 @@ function refresh() {
 }
 function select(entry, showWindow = false) {
   const view = entry.view;
+  if (view.active !== entry.id) stopAnnotations(view);
   if (!view.tabs.includes(entry.id)) view.tabs.push(entry.id);
   view.active = entry.id;
   if (entry.partition === 'persist:project' && !registeringTab) onePassword.host.selectTab(entry.content.webContents);
@@ -63,11 +70,17 @@ function select(entry, showWindow = false) {
   if (showWindow) view.window.show();
   if (view.window.isVisible()) { if (entry.dialog) view.ui.webContents.focus(); else entry.content.webContents.focus(); }
 }
+function stopAnnotations(view) {
+  view.annotating = false;
+  view.annotationDraft = null;
+  view.annotationToken = randomUUID();
+}
 function hideTab(view, id) {
   const index = view.tabs.indexOf(id);
   if (index === -1) throw new Error('Tab is not shown');
   view.tabs.splice(index, 1);
   if (view.active === id) {
+    stopAnnotations(view);
     view.active = null;
     const next = entries.get(view.tabs[Math.min(index, view.tabs.length - 1)]);
     if (next) select(next);
@@ -76,6 +89,7 @@ function hideTab(view, id) {
   refresh();
 }
 function runShortcut(view, { action, value }) {
+  if (view.annotating) { stopAnnotations(view); refresh(); }
   const entry = entries.get(view.active);
   const wc = entry?.content.webContents;
   if (!wc) return;
@@ -162,13 +176,17 @@ function createView(key) {
   const window = new BaseWindow({ show: false, width: 1200, height: 900, minWidth: 520, minHeight: 380,
     title: 'doze', autoHideMenuBar: process.platform !== 'darwin', backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
   const ui = new WebContentsView({ webPreferences: { preload: toolbarPreload, nodeIntegration: false, contextIsolation: true, sandbox: true } });
+  ui.setBackgroundColor('#00000000');
   window.contentView.addChildView(ui);
   const view = { key, window, ui, tabs: [], active: null };
   views.set(key, view);
   window.on('resize', () => {
+    stopAnnotations(view);
     for (const entry of entries.values()) if (entry.view === view) resize(entry);
     resizeUI(view);
+    refresh();
   });
+  window.on('hide', () => { stopAnnotations(view); refresh(); });
   window.on('close', event => { if (!quitting) { event.preventDefault(); window.hide(); } });
   window.on('closed', () => { if (!ui.webContents.isDestroyed()) ui.webContents.close({ waitForBeforeUnload: false }); });
   ui.webContents.on('focus', refreshStopMenu);
@@ -181,7 +199,7 @@ function createView(key) {
 }
 function resizeUI(view) {
   const [width, height] = view.window.getContentSize();
-  view.ui.setBounds({ x: 0, y: 0, width, height: entries.get(view.active)?.dialog ? height : toolbarHeight });
+  view.ui.setBounds({ x: 0, y: 0, width, height: entries.get(view.active)?.dialog || view.annotating ? height : toolbarHeight });
 }
 function resize(entry) {
   const [width, height] = entry.view.window.getContentSize();
@@ -223,12 +241,14 @@ function make(id, partition, opener, options = {}, owner) {
     webPreferences: { ...options.webPreferences, session: session.fromPartition(partition),
       preload: join(__dirname, 'electron-prompt.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   view.window.contentView.addChildView(content, 0);
-  const entry = { id, partition, opener, view, content, favicon: '', visible: true, userOnly: !!options.userOnly || !!entries.get(opener)?.userOnly };
+  const entry = { id, partition, opener, view, content, favicon: '', visible: true, userOnly: !!options.userOnly || !!entries.get(opener)?.userOnly,
+    annotations: [], document: randomUUID() };
   entries.set(id, entry);
   content.setVisible(true);
   resize(entry);
   const wc = content.webContents;
   wc.on('did-start-navigation', event => {
+    if (event.isMainFrame) { entry.document = randomUUID(); if (view.active === id) { stopAnnotations(view); refresh(); } }
     if (event.isMainFrame && isUserOnlyURL(event.url) && !entry.userOnly) {
       entry.userOnly = true;
       output({ event: 'protected', page: id });
@@ -296,6 +316,48 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
   const entry = entries.get(view.active);
   const wc = entry?.content.webContents;
   switch (action) {
+    case 'annotation-toggle': {
+      if (view.annotating) { stopAnnotations(view); refresh(); break; }
+      if (!entry || entry.userOnly || entry.dialog || !isShown(entry)) throw privacyError();
+      view.annotating = true;
+      view.annotationToken = randomUUID();
+      const token = view.annotationToken;
+      view.annotationDraft = null;
+      view.annotationViewport = null;
+      try {
+        entry.privacy ||= new PagePrivacy(wc);
+        await entry.privacy.start();
+        const { cssLayoutViewport } = await entry.privacy.send('Page.getLayoutMetrics');
+        view.annotationViewport = { width: cssLayoutViewport.clientWidth, height: cssLayoutViewport.clientHeight, scrollX: cssLayoutViewport.pageX, scrollY: cssLayoutViewport.pageY };
+      } catch (error) { refresh(); throw error; }
+      if (view.annotationToken !== token || view.active !== entry.id || !isShown(entry)) break;
+      view.ui.webContents.focus(); refresh(); break;
+    }
+    case 'annotation-select': {
+      if (!entry || !view.annotating || entry.userOnly || !isShown(entry)) throw privacyError();
+      const token = view.annotationToken;
+      view.annotationDraft = null;
+      refresh();
+      const draft = await selectAnnotation(entry, { kind: args.kind, x: args.x, y: args.y, width: args.width, height: args.height });
+      if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed. Select the target again.');
+      view.annotationDraft = draft;
+      refresh(); break;
+    }
+    case 'annotation-cancel': view.annotationDraft = null; refresh(); break;
+    case 'annotation-save': {
+      const draft = view.annotationDraft;
+      if (!entry || !view.annotating || !draft || draft.document !== entry.document || draft.url !== wc.getURL()) throw new Error('Select the annotation target again.');
+      if (typeof args.comment !== 'string' || !args.comment.trim() || args.comment.length > 4000) throw new Error('Enter an annotation comment.');
+      const token = view.annotationToken;
+      const selected = await selectAnnotation(entry, draft.kind === 'element' ? draft : { kind: 'area', ...Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * draft.zoom])) });
+      if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed. Select the target again.');
+      entry.annotations.push({ ...selected, comment: args.comment.trim() });
+      view.annotationDraft = null;
+      refresh(); break;
+    }
+    case 'annotation-delete':
+      if (!entry || !view.annotating || entry.userOnly) throw privacyError();
+      entry.annotations = entry.annotations.filter(note => note.id !== args.id); refresh(); break;
     case 'ready': refresh(); break;
     case 'close-window': view.window.close(); break;
     case 'navigate':
@@ -394,6 +456,7 @@ app.whenReady().then(async () => {
           const entry = entries.get(message.page);
           if (!entry) throw new Error('Page is closed');
           if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
+          if (entry.view.annotating && entry.view.active === entry.id && message.operation !== 'get_annotations') throw new Error('The user is adding annotations. Wait until annotation mode is closed.');
           const enabled = entry.partition === 'persist:project' && onePassword.enabled;
           if (message.operation === 'evaluate_script') {
             if (enabled) throw new Error('Arbitrary JavaScript is disabled in sessions with 1Password enabled. Use inspect_page, click and fill.');
@@ -444,6 +507,11 @@ app.whenReady().then(async () => {
           break;
         }
         case 'list': result = [...entries.values()].filter(entry => !entry.userOnly && !isUserOnlyURL(entry.content.webContents.getURL())).map(e => ({ ...pageState(e), visible: isShown(e) })); break;
+        case 'annotations': {
+          const entry = entries.get(message.page);
+          if (!entry || entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
+          result = entry.annotations.map(note => publicAnnotation(note, entry)); break;
+        }
         case 'quit':
           quitting = true;
           for (const entry of entries.values()) entry.content.webContents.close({ waitForBeforeUnload: false });

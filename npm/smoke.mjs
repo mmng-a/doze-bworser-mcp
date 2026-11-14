@@ -54,7 +54,7 @@ try {
   assert.equal(initialized.result?.serverInfo.version, metadata.version, JSON.stringify(initialized));
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   const catalog = await request('tools/list', {});
-  assert.equal(catalog.result.tools.length, 14);
+  assert.equal(catalog.result.tools.length, 15);
   assert.ok(catalog.result.tools.some(tool => tool.name === 'show_page'));
   const pages = await request('tools/call', { name: 'list_pages', arguments: {} });
   assert.equal(pages.result?.content[0].text, '[]');

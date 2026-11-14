@@ -150,6 +150,8 @@ class PagePrivacy {
       for (const loader of this.known.keys()) if (![...frames.values()].some(frame => frame.loaderId === loader)) this.known.delete(loader);
       for (const document of this.observedPasswords.keys()) if (!liveDocuments.has(document)) this.observedPasswords.delete(document);
       for (const node of this.nodeDocuments.keys()) if (!liveNodes.has(node)) { this.nodeDocuments.delete(node); this.nodeBackends.delete(node); }
+      this.frames = frames;
+      this.documentSessions = new Map([...frames.values()].map(frame => [frame.loaderId, documents.get(frame.id)]));
       return { version: this.version, passwords, entered, privateFrames, redact,
         privateLoaders: [...frames.values()].filter(frame => isUserOnlyURL(frame.url) || isUserOnlyURL(frame.securityOrigin)).map(frame => frame.loaderId) };
     } catch (cause) { throw new Error(privacyError().message, { cause }); }

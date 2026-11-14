@@ -16,6 +16,7 @@
   </nav>
   <div id="tabs" role="tablist" aria-label="共同操作のページ"></div>
   <select id="overflow" aria-label="ほかのページ" title="ほかのページ" hidden></select>
+  <button id="annotate" aria-label="注釈" title="注釈を付ける" aria-pressed="false">✎</button>
   <button id="one-password" aria-label="1Password" title="1Passwordをインストールして開く" hidden>1P</button>
   <browser-action-list id="extension-actions" partition="persist:project" alignment="bottom left" aria-label="1Password" hidden></browser-action-list>
 </header>
@@ -30,6 +31,21 @@
   </div>
 </template>
 <main>
+  <section id="annotation-layer" aria-label="注釈の選択" hidden>
+    <div id="annotation-pins"></div>
+    <div id="annotation-selection" hidden></div>
+    <aside id="annotation-panel">
+      <div class="annotation-heading"><strong>注釈</strong><button id="annotation-close" aria-label="注釈を終了">×</button></div>
+      <p id="annotation-help">要素をクリック、またはドラッグで範囲を選択</p>
+      <form id="annotation-form" hidden>
+        <label class="sr-only" for="annotation-comment">コメント</label>
+        <textarea id="annotation-comment" placeholder="この場所へのコメント" maxlength="4000" required></textarea>
+        <div class="actions"><button id="annotation-cancel" type="button">キャンセル</button><button class="primary" type="submit">保存</button></div>
+      </form>
+      <p id="annotation-error" role="status"></p>
+      <ol id="annotation-list"></ol>
+    </aside>
+  </section>
   <section id="modal" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="message" hidden>
     <div class="card"><span class="eyebrow" id="origin"></span><h1 id="dialog-title"></h1><p id="message"></p>
       <form id="answer"><label class="sr-only" for="prompt">回答</label><input id="prompt" aria-label="回答" autocomplete="off">
@@ -40,5 +56,6 @@
   <p id="error" role="status"></p>
 </main>
 <script src="app.js"></script>
+<script src="annotations.js"></script>
 </body>
 </html>

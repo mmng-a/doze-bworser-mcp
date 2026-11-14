@@ -27,6 +27,10 @@ Shortcuts are registered through Electron menu accelerators. macOS uses applicat
 
 The controls follow the OS light/dark setting with a monochrome palette. Inactive tabs have both a background and a border.
 
+Use the pencil button at the right to enter annotation mode. Click an element or drag to select an area, then save a comment. Saved annotations appear as numbered pins and a list; use the × beside a comment to delete it. Selection gestures do not reach the underlying page. AI page operations pause during annotation mode, while `get_annotations` remains available. After adding comments, ask the assistant to read the annotations.
+
+Annotations record comments, URLs, rectangles, element tags and selectors, viewport size, and scroll position. They do not automatically collect images or input values. Selecting protected password or 1Password content is refused, as is selecting or saving while a password is entered. Hiding a page preserves its annotations; closing the page or stopping the browser discards them. Navigation keeps earlier annotations available with `current: false` and hides their pins.
+
 In persistent profiles, the “1P” button installs the official 1Password Chrome extension. The first use opens 1Password's setup tab; the extension handles subsequent button clicks. Right-click the button for settings and updates. The extension and its account data use each project's storage and are separate from your regular Chrome profile. Extensions are unavailable in temporary sessions. To use the extension independently, turn off desktop app integration in its settings. Touch ID integration has not been verified.
 
 Once 1Password is enabled for a profile, arbitrary JavaScript through `evaluate_script` is disabled. Normal inspection, clicks and input continue through existing element IDs. Installation is refused if arbitrary JavaScript has already run in that browser session; close all pages and reopen the browser before installing. The restriction persists across restarts, including after an installation failure.
@@ -129,6 +133,7 @@ MCP does not remove OS restrictions or tool approval requirements. Hosts that sa
 | `show_page` | `page_id` | `OK` after displaying the existing page for joint interaction |
 | `list_pages` | None | Own pages with IDs, URLs, titles |
 | `inspect_page` | `page_id` | DevTools-style accessibility text with `uid` references |
+| `get_annotations` | `page_id` | User-saved annotation comments, locations, and URLs |
 | `navigate_page` | `page_id`, `url` | `OK` after DOM readiness |
 | `click` | `page_id`, `element` | `OK` |
 | `fill` | `page_id`, `element`, `value` | `OK` |
