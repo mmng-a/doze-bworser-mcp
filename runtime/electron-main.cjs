@@ -80,6 +80,14 @@ function stopAnnotations(view) {
   view.annotationDraft = null;
   view.annotationToken = randomUUID();
 }
+async function removeAnnotation(entry, id) {
+  const note = entry.annotations.find(note => note.id === id);
+  if (!note) throw new Error('Unknown annotation; get_annotations again');
+  await entry.adjustments?.remove(note);
+  if (entry.view.annotationDraft?.editId === id) entry.view.annotationDraft = null;
+  entry.annotations = entry.annotations.filter(note => note.id !== id);
+  refresh();
+}
 function hideTab(view, id) {
   const index = view.tabs.indexOf(id);
   if (index === -1) throw new Error('Tab is not shown');
@@ -377,7 +385,7 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
         selection = { kind: 'area', ...Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * wc.getZoomFactor()])) };
       }
       const selected = await selectAnnotation(entry, selection, hasAdjustments(note.adjustments));
-      if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed.');
+      if (view.annotationToken !== token || view.active !== entry.id || !entry.annotations.some(item => item.id === note.id)) throw new Error('The page changed.');
       view.annotationDraft = { ...selected, comment: note.comment, editId: note.id,
         adjustments: note.adjustments, adjustmentKey: note.adjustmentKey, adjustmentOrder: note.adjustmentOrder };
       refresh(); break;
@@ -449,10 +457,7 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
     }
     case 'annotation-delete': {
       if (!entry || !view.annotating || entry.userOnly) throw privacyError();
-      const note = entry.annotations.find(note => note.id === args.id);
-      if (note) await entry.adjustments?.remove(note);
-      if (view.annotationDraft?.editId === args.id) view.annotationDraft = null;
-      entry.annotations = entry.annotations.filter(note => note.id !== args.id); refresh(); break;
+      await removeAnnotation(entry, args.id); break;
     }
     case 'ready': refresh(); break;
     case 'close-window': view.window.close(); break;
@@ -552,7 +557,7 @@ app.whenReady().then(async () => {
           const entry = entries.get(message.page);
           if (!entry) throw new Error('Page is closed');
           if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
-          if (entry.view.annotating && entry.view.active === entry.id && message.operation !== 'get_annotations') throw new Error('The user is adding annotations. Wait until annotation mode is closed.');
+          if (entry.view.annotating && entry.view.active === entry.id && !['get_annotations','resolve_annotation'].includes(message.operation)) throw new Error('The user is adding annotations. Wait until annotation mode is closed.');
           const enabled = entry.partition === 'persist:project' && onePassword.enabled;
           if (message.operation === 'evaluate_script') {
             if (enabled) throw new Error('Arbitrary JavaScript is disabled in sessions with 1Password enabled. Use inspect_page, click and fill.');
@@ -607,6 +612,14 @@ app.whenReady().then(async () => {
           const entry = entries.get(message.page);
           if (!entry || entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
           result = entry.annotations.map(note => publicAnnotation(note, entry)); break;
+        }
+        case 'resolve-annotation': {
+          const entry = entries.get(message.page);
+          if (!entry || entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
+          if (entry.view.active === entry.id && entry.view.annotationDraft) throw new Error('The user is editing an annotation. Wait until the draft is saved or canceled.');
+          await removeAnnotation(entry, message.annotation);
+          if (!entry.annotations.length && entry.view.active === entry.id && !entry.view.annotationDraft) { stopAnnotations(entry.view); refresh(); }
+          result = 'OK'; break;
         }
         case 'quit':
           quitting = true;

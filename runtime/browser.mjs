@@ -236,6 +236,10 @@ export class BrowserManager {
         break;
       case 'inspect_page': return inspect(controller);
       case 'get_annotations': return record.engine.request('annotations', { page: record.id });
+      case 'resolve_annotation': {
+        const result = await record.engine.request('resolve-annotation', { page: record.id, annotation: args.annotation_id });
+        controller.nodes.clear(); return result;
+      }
       case 'click':
       case 'fill': {
         const node = controller.nodes.get(args.element);

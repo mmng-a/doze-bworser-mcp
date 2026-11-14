@@ -1,11 +1,12 @@
 const adjustmentGroups = [
-  ['文字', [['text', 'テキスト', 'text'], ['font-family', 'フォント'], ['font-size', '文字サイズ', 'length'],
+  ['文字', [['text', 'テキスト', 'text'], ['color', '文字色', 'color'], ['font-family', 'フォント'], ['font-size', '文字サイズ', 'length'],
     ['font-weight', '太さ', ['normal', 'bold', '100', '200', '300', '400', '500', '600', '700', '800', '900']],
     ['line-height', '行の高さ', 'length'], ['letter-spacing', '字間', 'length'], ['text-align', '揃え', ['start', 'left', 'center', 'right', 'justify', 'end']]]],
-  ['色・形', [['color', '文字色', 'color'], ['background-color', '背景色', 'color'], ['opacity', '不透明度'], ['border-radius', '角丸', 'length']]],
-  ['サイズ・余白', [['width', '幅', 'length'], ['height', '高さ', 'length'],
+  ['色・形', [['background-color', '背景色', 'color'], ['opacity', '不透明度'], ['border-radius', '角丸', 'length']]],
+  ['余白', [
     ['padding-top', '内側・上', 'length'], ['padding-right', '内側・右', 'length'], ['padding-bottom', '内側・下', 'length'], ['padding-left', '内側・左', 'length'],
     ['margin-top', '外側・上', 'length'], ['margin-right', '外側・右', 'length'], ['margin-bottom', '外側・下', 'length'], ['margin-left', '外側・左', 'length'], ['gap', '間隔', 'length']]],
+  ['サイズ', [['width', '幅', 'length'], ['height', '高さ', 'length']]],
   ['配置', [['display', '表示', ['block', 'inline', 'inline-block', 'flex', 'inline-flex', 'grid', 'inline-grid']],
     ['flex-direction', '方向', ['row', 'column', 'row-reverse', 'column-reverse']],
     ['align-items', '交差軸', ['normal', 'stretch', 'start', 'end', 'center', 'baseline', 'flex-start', 'flex-end']],
@@ -22,6 +23,57 @@ let adjustmentRevision = 0;
 let adjustmentPending = 0;
 let adjustmentDraftId;
 let adjustmentExpanded = false;
+let adjustmentScrub;
+const adjustmentScrubHelp = '左右にドラッグして調整（Shiftで大きく、Alt/Optionで細かく）';
+
+function setAdjustmentInput(input, value) {
+  input.value = value;
+  adjustmentWidgets.get(input.name)?.(value);
+  input.dispatchEvent(new Event('input', {bubbles:true}));
+  input.dispatchEvent(new Event('change', {bubbles:true}));
+}
+function stopAdjustmentScrub(revert = false) {
+  const scrub = adjustmentScrub; adjustmentScrub = null;
+  document.documentElement.classList.remove('adjust-scrubbing');
+  if (!scrub) return;
+  if (scrub.handle.hasPointerCapture(scrub.pointer)) scrub.handle.releasePointerCapture(scrub.pointer);
+  if (revert && scrub.moved && annotationState?.draft?.id === scrub.draft) setAdjustmentInput(scrub.input, scrub.original);
+}
+function makeAdjustmentScrubbable(input, caption, key) {
+  const start = event => {
+    if (event.button !== 0 || (event.currentTarget === input && document.activeElement === input)) return;
+    const original = adjustmentDirty.get(key) ?? annotationState?.draft?.adjust?.values[key];
+    const match = original?.match(/^(-?(?:\d+(?:\.\d+)?|\.\d+))(px|em|rem|%|vw|vh)?$/);
+    if (!match) return;
+    adjustmentScrub = {input, handle:event.currentTarget, pointer:event.pointerId, x:event.clientX, original, value:Number(match[1]), unit:match[2]||'', draft:annotationState.draft.id, moved:false};
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const move = event => {
+    const scrub = adjustmentScrub;
+    if (!scrub || scrub.handle !== event.currentTarget) return;
+    const delta = event.clientX - scrub.x;
+    if (!scrub.moved && Math.abs(delta) < 3) return;
+    scrub.moved = true; event.preventDefault(); input.blur();
+    document.documentElement.classList.add('adjust-scrubbing');
+    const step = key === 'opacity' || ['em','rem'].includes(scrub.unit) ? .01 : 1;
+    let value = scrub.value + delta * step * (event.shiftKey ? 10 : event.altKey ? .1 : 1);
+    const minimum = key.startsWith('margin-') || key === 'letter-spacing' ? -10000 : 0;
+    value = Math.max(minimum, Math.min(key === 'opacity' ? 1 : 10000, value));
+    setAdjustmentInput(input, String(Math.round(value * 10000) / 10000) + scrub.unit);
+  };
+  for (const handle of [input,caption]) {
+    handle.onpointerdown=start; handle.onpointermove=move;
+    handle.onpointerup=()=>stopAdjustmentScrub();
+    handle.onpointercancel=()=>stopAdjustmentScrub(true);
+    handle.addEventListener('click',event=>{if(handle.dataset.scrubbed){delete handle.dataset.scrubbed;event.preventDefault();event.stopPropagation();}},true);
+    handle.addEventListener('pointerup',()=>{if(adjustmentScrub?.moved)handle.dataset.scrubbed='true';},true);
+  }
+  caption.classList.add('adjust-scrub-label');
+  input.dataset.scrub='true'; input.title=adjustmentScrubHelp;
+}
+document.addEventListener('keydown',event=>{
+  if (event.key==='Escape' && adjustmentScrub) {event.preventDefault();event.stopImmediatePropagation();stopAdjustmentScrub(true);}
+},true);
 
 function hasDraftAdjustments(draft) { return !!draft?.adjustments && (Object.keys(draft.adjustments.styles || {}).length > 0 || !!draft.adjustments.text); }
 function annotationSummary(note) {
@@ -30,6 +82,7 @@ function annotationSummary(note) {
   return labels.length ? labels.slice(0, 2).join('・') + 'を調整' : '注釈';
 }
 function discardAdjustmentInputs() {
+  stopAdjustmentScrub();
   adjustmentRevision++;
   for (const timer of adjustmentTimers.values()) clearTimeout(timer);
   adjustmentTimers.clear(); adjustmentDirty.clear(); adjustmentErrors.clear();
@@ -81,13 +134,16 @@ function renderAdjust(draft) {
   const vertical = flex && (adjustmentDirty.get('flex-direction') ?? draft?.adjust?.values['flex-direction'] ?? '').startsWith('column');
   for (const [key, input] of adjustmentInputs) {
     const value = key === 'text' ? draft?.adjust?.text : draft?.adjust?.values[key];
+    if (input.dataset.scrub) {
+      input.dataset.scrubbable = String(/^-?[\d.]+(?:px|em|rem|%|vw|vh)?$/.test(value));
+      input.title = value == null ? '' : value + (input.dataset.scrubbable === 'true' ? '\n' + adjustmentScrubHelp : '');
+    }
     input.closest('label').hidden = (key === 'text' && value == null) || (key === 'flex-direction' && !flex) || (['align-items','justify-content','gap'].includes(key) && !layout);
     if (value != null) adjustmentWidgets.get(key)?.(adjustmentDirty.get(key) ?? value);
     if (key === 'align-items' || key === 'justify-content') for (const icon of input.closest('label').querySelectorAll('svg')) icon.style.transform = vertical ? 'rotate(90deg)' : '';
     if (value == null || adjustmentDirty.has(key) || document.activeElement === input) continue;
     if (input instanceof HTMLSelectElement && ![...input.options].some(option => option.value === value)) input.add(new Option(value, value));
     input.value = input.closest('.box-model-margin') && /^-?[\d.]+px$/.test(value) ? String(Math.round(parseFloat(value) * 100) / 100) : value;
-    if (input.closest('.box-model-margin')) input.title = value;
   }
   adjustSaveState();
 }
@@ -131,7 +187,7 @@ const colorCanvas = document.createElement('canvas'); colorCanvas.width = colorC
 const colorContext = colorCanvas.getContext('2d', {willReadFrequently:true});
 function enhanceAdjustment(input, key, kind, label) {
   const control = document.createElement('div'); control.className = 'adjust-control';
-  const set = value => { input.value = value; adjustmentWidgets.get(key)?.(value); input.dispatchEvent(new Event('input', {bubbles:true})); input.dispatchEvent(new Event('change', {bubbles:true})); };
+  const set = value => setAdjustmentInput(input,value);
   if (kind === 'color') {
     const picker = document.createElement('input'); picker.type = 'color'; picker.className = 'adjust-color-picker'; picker.setAttribute('aria-label', label + 'を選択');
     const swatch=document.createElement('span');swatch.className='adjust-color-swatch';
@@ -175,23 +231,22 @@ function enhanceAdjustment(input, key, kind, label) {
   } else control.append(input);
   return control;
 }
-for (const [title, fields] of [adjustmentGroups[2], ...adjustmentGroups.filter((_, index) => index !== 2)]) {
-  const spacing = title === 'サイズ・余白';
-  const group = document.createElement('details'); group.open = spacing || title === '文字'; group.dataset.adjustGroup = title;
+for (const [title, fields] of ['余白','サイズ','文字','色・形','配置'].map(title => adjustmentGroups.find(group => group[0] === title))) {
+  const spacing = title === '余白';
+  const group = document.createElement('details'); group.open = spacing || title === 'サイズ'; group.dataset.adjustGroup = title;
   const summary = document.createElement('summary'); summary.textContent = title; group.append(summary);
   const grid = document.createElement('div'); grid.className = 'adjust-grid';
-  let margin, padding, dimensions;
+  let margin, padding;
   if (spacing) {
     margin = document.createElement('div'); margin.className = 'box-model-margin adjust-wide';
-    margin.setAttribute('role', 'group'); margin.setAttribute('aria-label', '外側と内側の余白、サイズ。単位はpx');
+    margin.setAttribute('role', 'group'); margin.setAttribute('aria-label', '外側と内側の余白。単位はpx');
     const unit = document.createElement('span'); unit.className = 'box-model-unit'; unit.textContent = 'px'; margin.append(unit);
     padding = document.createElement('div'); padding.className = 'box-model-padding';
     const content = document.createElement('div'); content.className = 'box-model-content';
-    for (const [element, text] of [[margin, 'margin'], [padding, 'padding'], [content, 'サイズ']]) {
+    for (const [element, text] of [[margin, 'margin'], [padding, 'padding'], [content, '要素']]) {
       const tag = document.createElement('span'); tag.className = 'box-model-tag'; tag.textContent = text; element.append(tag);
     }
-    dimensions = document.createElement('div'); dimensions.className = 'box-model-dimensions';
-    content.append(dimensions); padding.append(content); margin.append(padding); grid.append(margin);
+    padding.append(content); margin.append(padding); grid.append(margin);
   }
   for (const [key, title, kind] of fields) {
     const label = document.createElement('label'); const caption = document.createElement('span'); caption.textContent = title;
@@ -212,14 +267,11 @@ for (const [title, fields] of [adjustmentGroups[2], ...adjustmentGroups.filter((
       adjustmentTimers.set(key, setTimeout(() => enqueueAdjustment(key), 180));
     };
     input.onchange = () => { if (adjustmentDirty.has(key)) enqueueAdjustment(key); };
+    if (kind === 'length' || key === 'opacity') makeAdjustmentScrubbable(input,caption,key);
     label.append(caption, spacing ? input : enhanceAdjustment(input,key,kind,title));
     if (spacing && /^(margin|padding)-/.test(key)) {
       label.className = 'box-side box-' + key.split('-')[1]; label.title = title;
       (key.startsWith('margin-') ? margin : padding).append(label);
-    } else if (spacing && ['width', 'height'].includes(key)) {
-      label.className = 'box-size'; label.title = title;
-      if (key === 'height') { const separator = document.createElement('span'); separator.textContent = '×'; separator.setAttribute('aria-hidden', 'true'); dimensions.append(separator); }
-      dimensions.append(label);
     } else grid.append(label);
     adjustmentInputs.set(key, input);
   }

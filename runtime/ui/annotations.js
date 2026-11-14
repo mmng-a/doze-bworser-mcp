@@ -8,6 +8,7 @@ let hoverPoint;
 let hoverSequence = 0;
 let hoverTask = Promise.resolve();
 let hoverBusy = false;
+let annotationPanelAnchor;
 let annotationMenuTimer;
 
 function showAnnotationMenu(show) {
@@ -84,11 +85,16 @@ function contentPoint(event) {
 function positionAnnotationPanel() {
   const panel = annotationElement('annotation-panel');
   const draft = annotationState?.draft;
-  if (!draft) { panel.style.left = ''; panel.style.top = ''; panel.style.right = ''; return; }
+  if (!draft) { annotationPanelAnchor = null; panel.style.left = ''; panel.style.top = ''; panel.style.right = ''; return; }
+  if (annotationPanelAnchor?.id === draft.id) {
+    Object.assign(panel.style, { right:'auto', left:annotationPanelAnchor.x+'px', top:annotationPanelAnchor.y+'px' }); return;
+  }
   const rect = Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * annotationState.zoom]));
   const margin = 12;
   const width = panel.offsetWidth;
-  const height = panel.offsetHeight;
+  const controls = getComputedStyle(annotationElement('adjust-controls'));
+  const reserved = draft.kind === 'element' ? parseFloat(controls.maxHeight) + parseFloat(controls.marginTop) + parseFloat(controls.borderTopWidth) : 0;
+  const height = Math.min(layer.clientHeight - 2 * margin, panel.offsetHeight + reserved);
   const maxX = Math.max(margin, layer.clientWidth - width - margin);
   const maxY = Math.max(margin, layer.clientHeight - height - margin);
   let x = rect.x;
@@ -99,7 +105,8 @@ function positionAnnotationPanel() {
     if (x > maxX) x = rect.x - width - margin;
     y = rect.y;
   }
-  Object.assign(panel.style, { right: 'auto', left: Math.max(margin, Math.min(maxX, x)) + 'px', top: Math.max(margin, Math.min(maxY, y)) + 'px' });
+  annotationPanelAnchor = { id:draft.id, x:Math.max(margin,Math.min(maxX,x)), y:Math.max(margin,Math.min(maxY,y)) };
+  Object.assign(panel.style, { right: 'auto', left: annotationPanelAnchor.x + 'px', top: annotationPanelAnchor.y + 'px' });
 }
 annotationElement('annotate').onclick = () => annotationAction('annotation-toggle');
 annotationElement('annotate').onpointerenter = () => showAnnotationMenu(true);

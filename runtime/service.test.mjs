@@ -107,7 +107,7 @@ test('concurrent stdio launchers share one cold Node endpoint and SDK schemas', 
   const [one, two, three] = await Promise.all([f.client(), f.client(), f.client()]);
   assert.deepEqual(f.status(), { connections: 3, pages: 0, browsers: 0 });
   const catalog = (await one.request('tools/list', {}).promise).result.tools;
-  assert.equal(catalog.length, 15);
+  assert.equal(catalog.length, 16);
   assert.equal(catalog.find(t => t.name === 'handle_dialog').inputSchema.properties.accept.type, 'boolean');
   const invalid = await two.call('handle_dialog', { page_id: 'missing', accept: 'false' }).promise;
   assert.ok(invalid.error || invalid.result?.isError);

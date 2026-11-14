@@ -411,6 +411,7 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   const { manager, caller, url } = await setup(t, true, false, true);
   const first = await manager.call(caller, 'open_page', { url, headed: true });
   const record = manager.pages.get(first.page_id);
+  record.page.setDefaultTimeout(5000);
   await record.page.evaluate(() => { document.body.innerHTML = '<button id="adjust-target" style="font-size:16px;color:rgb(17,17,17);padding:10px">Original</button>'; });
   const ui = await record.engine.page({ targetId: record.entry.uiTargetId }); ui.setDefaultTimeout(5000);
   const font = value => record.page.waitForFunction(value => getComputedStyle(document.getElementById('adjust-target')).fontSize === value, {}, value);
@@ -419,18 +420,35 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
     await ui.mouse.click(rect.x, rect.y + 48);
     await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
   };
-  const adjust = async () => { await ui.locator('#annotation-adjust').click(); await ui.waitForFunction(() => !document.getElementById('adjust-controls').hidden); };
+  const adjust = async () => {
+    await ui.waitForFunction(()=>!document.getElementById('annotation-panel').hidden);
+    const before=await ui.$eval('#annotation-panel',element=>({x:element.getBoundingClientRect().x,y:element.getBoundingClientRect().y}));
+    await ui.locator('#annotation-adjust').click(); await ui.waitForFunction(() => !document.getElementById('adjust-controls').hidden);
+    await ui.$eval('#adjust-controls details[data-adjust-group="文字"]', element => element.open=true);
+    assert.deepEqual(await ui.$eval('#annotation-panel',element=>({x:element.getBoundingClientRect().x,y:element.getBoundingClientRect().y})),before,'opening adjustments keeps the annotation panel in place');
+  };
+  const scrub = async (selector, distance, modifier) => {
+    const element=await ui.$(selector); await element.scrollIntoView(); const rect=await element.boundingBox();
+    if(modifier)await ui.keyboard.down(modifier);
+    await ui.mouse.move(rect.x+rect.width/2,rect.y+rect.height/2);await ui.mouse.down();await ui.mouse.move(rect.x+rect.width/2+distance,rect.y+rect.height/2,{steps:4});await ui.mouse.up();
+    if(modifier)await ui.keyboard.up(modifier);
+  };
   const change = async (property, value) => { await ui.locator('#adjust-' + property).fill(value); await ui.keyboard.press('Tab'); };
   const save = async count => { await ui.locator('#annotation-form button[type=submit]').click(); await ui.waitForFunction(count => document.querySelectorAll('#annotation-list li').length === count && document.getElementById('annotation-form').hidden, {}, count); };
   await ui.locator('#annotate').click(); await select(); await adjust();
   assert.equal(await ui.$eval('#adjust-text', element => element.value), 'Original');
   assert.equal(await ui.$eval('#annotation-adjust', element => element.textContent), '');
-  await change('padding-left', '18');
+  assert.equal(await ui.$eval('#adjust-width', input => input.closest('.box-model-margin')),null);
+  assert.ok(await ui.$eval('#adjust-width', input => { const rect=input.getBoundingClientRect(); const panel=input.closest('#adjust-controls').getBoundingClientRect(); return rect.width>=100 && rect.bottom<=panel.bottom; }), 'size fields have enough width and are visible outside the spacing diagram');
+  assert.equal(await ui.$eval('#adjust-color',input=>input.closest('details').dataset.adjustGroup),'文字');
+  await scrub('#adjust-padding-left',8);
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).paddingLeft === '18px');
   await change('margin-top', '12');
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).marginTop === '12px');
   await assert.rejects(ui.evaluate(() => window.doze.act('annotation-adjust-change', { property:'background-image', value:'url(https://example.invalid/)' })), /Invalid adjustment/);
   await assert.rejects(ui.evaluate(() => window.doze.act('annotation-adjust-change', { property:'color', value:'red; background: url(https://example.invalid/)' })), /Invalid adjustment/);
+  await scrub('label:has(#adjust-font-size) > span',4,'Shift');await font('56px');
+  await scrub('label:has(#adjust-font-size) > span',10,'Alt');await font('57px');
   await change('font-size', '24'); await font('24px');
   await ui.locator('button[aria-label="文字サイズを大きく"]').click(); await font('25px');
   await ui.locator('button[aria-label="文字サイズを小さく"]').click(); await font('24px');
@@ -452,7 +470,7 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).flexDirection === 'column');
   await ui.locator('label:has(#adjust-align-items) button[aria-label="中央"]').click();
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).alignItems === 'center');
-  await ui.$eval('#adjust-controls', element => { element.querySelector('[data-adjust-group="サイズ・余白"]').open=false; element.querySelector('[data-adjust-group="文字"]').open=false; element.scrollTop=0; });
+  await ui.$eval('#adjust-controls', element => { element.querySelector('[data-adjust-group="余白"]').open=false; element.querySelector('[data-adjust-group="文字"]').open=false; element.scrollTop=0; });
   await ui.screenshot({ path:join(tmpdir(),'doze-adjust-visual-controls.png') });
   await ui.$eval('#adjust-controls', element => element.scrollTop=element.scrollHeight);
   await ui.screenshot({ path:join(tmpdir(),'doze-adjust-layout-controls.png') });
@@ -473,6 +491,7 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   assert.equal('adjustmentKey' in note, false); assert.equal('adjust' in note, false);
   await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression:'1' }), /adding annotations/);
   await ui.locator('.annotation-pin').click(); await adjust();
+  await assert.rejects(manager.call(caller,'resolve_annotation',{...first,annotation_id:note.id}),/editing an annotation/);
   await change('font-size', '32'); await font('32px');
   await ui.locator('#annotation-cancel').click(); await font('24px');
   await ui.locator('.annotation-pin').click(); await adjust();
@@ -487,9 +506,14 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 1);
   await font('30px');
   assert.equal(await record.page.$eval('#adjust-target', element => element.textContent), 'Original');
-  await ui.locator('#annotation-list li button').click(); await font('16px');
+  await record.page.evaluate(()=>document.getElementById('adjust-target').style.setProperty('font-size','36px'));
+  await assert.rejects(manager.call({thread:'other'},'resolve_annotation',{...first,annotation_id:notes[1].id}),/Page is closed/);
+  await assert.rejects(manager.call(caller,'resolve_annotation',{...first,annotation_id:'missing'}),/Unknown annotation/);
+  assert.equal(await manager.call(caller,'resolve_annotation',{...first,annotation_id:notes[1].id}),'OK');
+  await font('36px');
+  assert.deepEqual(await manager.call(caller,'get_annotations',first),[]);
+  assert.match(await manager.call(caller,'inspect_page',first),/Original/);
   assert.equal(await record.page.$eval('#adjust-target', element => element.style.getPropertyPriority('font-size')), '');
-  await ui.locator('#annotate').click();
   await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression:'1' }), /Arbitrary JavaScript is disabled/);
   const prompting = record.page.evaluate(() => { window.adjustPromptReply = prompt('Synthetic prompt', 'seed'); });
   await ui.waitForFunction(() => !document.getElementById('modal').hidden);
@@ -511,7 +535,7 @@ test('Electron Adjust: form values stay private, protection races roll back, hid
   const select = async selector => {
     const rect = await record.page.$eval(selector, element => { const r = element.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; });
     await ui.mouse.click(rect.x, rect.y+48); await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
-    await ui.locator('#annotation-adjust').click(); await ui.waitForFunction(() => !document.getElementById('adjust-controls').hidden);
+    await ui.locator('#annotation-adjust').click(); await ui.waitForFunction(() => !document.getElementById('adjust-controls').hidden); await ui.$eval('#adjust-controls details[data-adjust-group="文字"]', element => element.open=true);
   };
   await ui.locator('#annotate').click(); await select('#ordinary');
   assert.equal(await ui.$eval('#adjust-text', element => element.closest('label').hidden), true);
@@ -519,6 +543,7 @@ test('Electron Adjust: form values stay private, protection races roll back, hid
   await ui.locator('#annotation-cancel').click(); await select('#adjust-target');
   await ui.locator('#adjust-font-size').fill('27'); await ui.keyboard.press('Tab');
   await ui.waitForFunction(() => document.getElementById('annotation-error').textContent.includes('保護された表示'));
+  await assert.rejects(manager.call(caller,'resolve_annotation',{...first,annotation_id:'private'}),/protected/);
   assert.equal(await record.page.$eval('#adjust-target', element => getComputedStyle(element).fontSize), '16px');
   await record.page.evaluate(() => document.getElementById('password').value = '');
   assert.deepEqual(await manager.call(caller, 'get_annotations', first), []);
