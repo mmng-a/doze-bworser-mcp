@@ -73,16 +73,31 @@ function renderAdjust(draft) {
     input.closest('label').hidden = key === 'text' && value == null;
     if (value == null || adjustmentDirty.has(key) || document.activeElement === input) continue;
     if (input instanceof HTMLSelectElement && ![...input.options].some(option => option.value === value)) input.add(new Option(value, value));
-    input.value = value;
+    input.value = input.closest('.box-model-margin') && /^-?[\d.]+px$/.test(value) ? String(Math.round(parseFloat(value) * 100) / 100) : value;
+    if (input.closest('.box-model-margin')) input.title = value;
     if (key === 'color' || key === 'background-color') input.style.borderLeftColor = CSS.supports('color', value) ? value : '';
   }
   adjustSaveState();
 }
 const adjustmentPanel = document.getElementById('adjust-controls');
-for (const [title, fields] of adjustmentGroups) {
-  const group = document.createElement('details'); group.open = title === '文字';
+for (const [title, fields] of [adjustmentGroups[2], ...adjustmentGroups.filter((_, index) => index !== 2)]) {
+  const spacing = title === 'サイズ・余白';
+  const group = document.createElement('details'); group.open = spacing || title === '文字'; group.dataset.adjustGroup = title;
   const summary = document.createElement('summary'); summary.textContent = title; group.append(summary);
   const grid = document.createElement('div'); grid.className = 'adjust-grid';
+  let margin, padding, dimensions;
+  if (spacing) {
+    margin = document.createElement('div'); margin.className = 'box-model-margin adjust-wide';
+    margin.setAttribute('role', 'group'); margin.setAttribute('aria-label', '外側と内側の余白、サイズ。単位はpx');
+    const unit = document.createElement('span'); unit.className = 'box-model-unit'; unit.textContent = 'px'; margin.append(unit);
+    padding = document.createElement('div'); padding.className = 'box-model-padding';
+    const content = document.createElement('div'); content.className = 'box-model-content';
+    for (const [element, text] of [[margin, 'margin'], [padding, 'padding'], [content, 'サイズ']]) {
+      const tag = document.createElement('span'); tag.className = 'box-model-tag'; tag.textContent = text; element.append(tag);
+    }
+    dimensions = document.createElement('div'); dimensions.className = 'box-model-dimensions';
+    content.append(dimensions); padding.append(content); margin.append(padding); grid.append(margin);
+  }
   for (const [key, title, kind] of fields) {
     const label = document.createElement('label'); const caption = document.createElement('span'); caption.textContent = title;
     const input = document.createElement(Array.isArray(kind) ? 'select' : kind === 'text' ? 'textarea' : 'input');
@@ -99,7 +114,16 @@ for (const [title, fields] of adjustmentGroups) {
       adjustmentTimers.set(key, setTimeout(() => enqueueAdjustment(key), 180));
     };
     input.onchange = () => { if (adjustmentDirty.has(key)) enqueueAdjustment(key); };
-    label.append(caption, input); grid.append(label); adjustmentInputs.set(key, input);
+    label.append(caption, input);
+    if (spacing && /^(margin|padding)-/.test(key)) {
+      label.className = 'box-side box-' + key.split('-')[1]; label.title = title;
+      (key.startsWith('margin-') ? margin : padding).append(label);
+    } else if (spacing && ['width', 'height'].includes(key)) {
+      label.className = 'box-size'; label.title = title;
+      if (key === 'height') { const separator = document.createElement('span'); separator.textContent = '×'; separator.setAttribute('aria-hidden', 'true'); dimensions.append(separator); }
+      dimensions.append(label);
+    } else grid.append(label);
+    adjustmentInputs.set(key, input);
   }
   group.append(grid); adjustmentPanel.append(group);
 }

@@ -424,11 +424,17 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   const save = async count => { await ui.locator('#annotation-form button[type=submit]').click(); await ui.waitForFunction(count => document.querySelectorAll('#annotation-list li').length === count && document.getElementById('annotation-form').hidden, {}, count); };
   await ui.locator('#annotate').click(); await select(); await adjust();
   assert.equal(await ui.$eval('#adjust-text', element => element.value), 'Original');
+  assert.equal(await ui.$eval('#annotation-adjust', element => element.textContent), '');
+  await change('padding-left', '18');
+  await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).paddingLeft === '18px');
+  await change('margin-top', '12');
+  await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).marginTop === '12px');
   await assert.rejects(ui.evaluate(() => window.doze.act('annotation-adjust-change', { property:'background-image', value:'url(https://example.invalid/)' })), /Invalid adjustment/);
   await assert.rejects(ui.evaluate(() => window.doze.act('annotation-adjust-change', { property:'color', value:'red; background: url(https://example.invalid/)' })), /Invalid adjustment/);
   await change('font-size', '24'); await font('24px');
+  await ui.$eval('#adjust-controls', element => element.scrollTop = 0);
   await ui.screenshot({ path: join(tmpdir(), 'doze-adjust-ui.png') });
-  await ui.locator('#adjust-controls details:nth-of-type(2) summary').click();
+  await ui.locator('#adjust-controls details[data-adjust-group="色・形"] summary').click();
   await change('color', '#cc2233');
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).color === 'rgb(204, 34, 51)');
   await change('text', 'New <b>text</b>');
@@ -438,6 +444,8 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   const [note] = await manager.call(caller, 'get_annotations', first);
   assert.equal(note.comment, '');
   assert.deepEqual(note.adjustments.styles['font-size'], { before:'16px', after:'24px' });
+  assert.deepEqual(note.adjustments.styles['padding-left'], { before:'10px', after:'18px' });
+  assert.deepEqual(note.adjustments.styles['margin-top'], { before:'0px', after:'12px' });
   assert.deepEqual(note.adjustments.text, { before:'Original', after:'New <b>text</b>' });
   assert.equal('adjustmentKey' in note, false); assert.equal('adjust' in note, false);
   await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression:'1' }), /adding annotations/);
