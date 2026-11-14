@@ -8,6 +8,9 @@ async function act(action, args) {
   catch (error) { $('error').textContent = error.message; return false; }
 }
 for (const action of ['back', 'forward', 'reload']) $(action).onclick = () => act(action);
+$('one-password').onclick = () => act('one-password');
+$('one-password').oncontextmenu = event => { event.preventDefault(); void act('one-password-menu'); };
+$('extension-actions').addEventListener('contextmenu', event => { event.preventDefault(); event.stopPropagation(); void act('one-password-menu'); }, true);
 $('overflow').onchange = event => { void act('switch', { page: event.target.value }); event.target.value = ''; };
 $('answer').onsubmit = event => { event.preventDefault(); void answer(true); };
 $('cancel').onclick = () => answer(false);
@@ -112,6 +115,11 @@ window.doze.subscribe(next => {
   state = next;
   document.documentElement.classList.toggle('mac', next.mac);
   $('back').disabled = !next.back; $('forward').disabled = !next.forward;
+  $('one-password').hidden = !next.onePassword || next.onePassword.installed;
+  $('extension-actions').hidden = !next.onePassword?.installed;
+  if (next.onePassword) $('extension-actions').setAttribute('tab', String(next.onePassword.tabId));
+  $('one-password').disabled = !!next.onePassword?.busy;
+  $('one-password').title = next.onePassword?.error || (next.onePassword?.busy ? '1Passwordを準備中…' : next.onePassword?.installed ? '1Password（右クリックで設定・更新）' : '1Passwordをインストールして開く');
   renderTabs();
   if (focusWasInTabs && document.activeElement === document.body) tabs.get(next.id)?.querySelector('.tab-select').focus();
   $('modal').hidden = !next.dialog;

@@ -1,9 +1,12 @@
-const { app, BaseWindow, WebContentsView, ipcMain, session, nativeTheme, Menu, MenuItem } = require('electron');
+const { app, BaseWindow, WebContentsView, ipcMain, session, nativeTheme, Menu, MenuItem, dialog } = require('electron');
 const { join } = require('node:path');
 const { randomUUID } = require('node:crypto');
 const readline = require('node:readline');
 const { preserveSessionCookies } = require('./session-cookies.cjs');
+const { OnePassword, extensionId } = require('./one-password.cjs');
 const { pathToFileURL } = require('node:url');
+const { readFile, writeFile } = require('node:fs/promises');
+const { isUserOnlyURL, privacyError, PagePrivacy } = require('./privacy.cjs');
 const profile = process.env.DOZE_ELECTRON_PROFILE;
 if (!profile) throw new Error('Missing private browser profile');
 app.setPath('userData', profile);
@@ -14,8 +17,14 @@ const configuredSessions = new WeakSet();
 const toolbarHeight = 48;
 let quitting = false;
 let browserMenu;
+let onePassword;
+let registeringTab = false;
+let extensionsLoaded;
+let openExtensionTab;
+let scriptsUsed = false;
 const output = message => process.stdout.write(JSON.stringify(message) + '\n');
 const uiURL = pathToFileURL(join(__dirname, 'ui/index.html')).href;
+const toolbarPreload = join(profile, 'doze-toolbar-preload.cjs');
 function pageState(entry) {
   const wc = entry.content.webContents;
   return { id: entry.id, title: wc.getTitle(), url: wc.getURL(), favicon: entry.favicon };
@@ -27,6 +36,7 @@ function state(view) {
   const wc = entry?.content.webContents;
   return { id: entry?.id, mac: process.platform === 'darwin', url: wc?.getURL() || '', origin,
     back: wc?.navigationHistory.canGoBack() || false, forward: wc?.navigationHistory.canGoForward() || false, dialog: entry?.dialog?.info,
+    onePassword: entry?.partition === 'persist:project' ? { ...onePassword.state, tabId: wc.id } : null,
     pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
 }
 function refresh() {
@@ -45,6 +55,7 @@ function select(entry, showWindow = false) {
   const view = entry.view;
   if (!view.tabs.includes(entry.id)) view.tabs.push(entry.id);
   view.active = entry.id;
+  if (entry.partition === 'persist:project' && !registeringTab) onePassword.host.selectTab(entry.content.webContents);
   resize(entry);
   view.window.contentView.addChildView(entry.content);
   view.window.contentView.addChildView(view.ui);
@@ -150,7 +161,7 @@ function installMenuShortcuts() {
 function createView(key) {
   const window = new BaseWindow({ show: false, width: 1200, height: 900, minWidth: 520, minHeight: 380,
     title: 'doze', autoHideMenuBar: process.platform !== 'darwin', backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1c' : '#f5f5f5', ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}) });
-  const ui = new WebContentsView({ webPreferences: { preload: join(__dirname, 'ui/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
+  const ui = new WebContentsView({ webPreferences: { preload: toolbarPreload, nodeIntegration: false, contextIsolation: true, sandbox: true } });
   window.contentView.addChildView(ui);
   const view = { key, window, ui, tabs: [], active: null };
   views.set(key, view);
@@ -206,17 +217,32 @@ function configurePermissions(browserSession) {
 function make(id, partition, opener, options = {}, owner) {
   configurePermissions(session.fromPartition(partition));
   const key = JSON.stringify([partition, owner]);
-  const view = opener ? entries.get(opener).view : views.get(key) || createView(key);
+  const view = options.view || (opener ? entries.get(opener).view : views.get(key) || createView(key));
   // Reuse the renderer-created WebContents to retain the popup's initial navigation and opener.
   const content = new WebContentsView({ ...(options.webContents ? { webContents: options.webContents } : {}),
     webPreferences: { ...options.webPreferences, session: session.fromPartition(partition),
       preload: join(__dirname, 'electron-prompt.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   view.window.contentView.addChildView(content, 0);
-  const entry = { id, partition, opener, view, content, favicon: '', visible: true };
+  const entry = { id, partition, opener, view, content, favicon: '', visible: true, userOnly: !!options.userOnly || !!entries.get(opener)?.userOnly };
   entries.set(id, entry);
   content.setVisible(true);
   resize(entry);
   const wc = content.webContents;
+  wc.on('did-start-navigation', event => {
+    if (event.isMainFrame && isUserOnlyURL(event.url) && !entry.userOnly) {
+      entry.userOnly = true;
+      output({ event: 'protected', page: id });
+    }
+  });
+  if (partition === 'persist:project') {
+    registeringTab = true;
+    try { onePassword.host.addTab(wc, view.window); }
+    finally { registeringTab = false; }
+    wc.on('context-menu', (_event, params) => {
+      const items = onePassword.host.getContextMenuItems(wc, params);
+      if (items.length) Menu.buildFromTemplate(items).popup({ window: view.window, frame: params.frame });
+    });
+  }
   wc.on('focus', refreshStopMenu);
   wc.on('blur', refreshStopMenu);
   // Keep the native callback from creation, before Puppeteer can acquire the Page.
@@ -255,7 +281,7 @@ function make(id, partition, opener, options = {}, owner) {
     if (![...entries.values()].some(e => e.view === view)) { views.delete(view.key); if (!view.window.isDestroyed()) view.window.destroy(); }
     refresh();
   });
-  output({ event: 'created', entry: { id, opener, targetId: wc.getOrCreateDevToolsTargetId(), uiTargetId: view.ui.webContents.getOrCreateDevToolsTargetId() } });
+  if (!entry.userOnly) output({ event: 'created', entry: { id, opener, targetId: wc.getOrCreateDevToolsTargetId(), uiTargetId: view.ui.webContents.getOrCreateDevToolsTargetId() } });
   return entry;
 }
 async function navigate(entry, url) { await entry.content.webContents.loadURL(url); }
@@ -279,6 +305,22 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
     case 'back': if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': wc.reload(); break;
+    case 'one-password':
+      if (entry?.partition !== 'persist:project') throw new Error('1Password requires a saved project session');
+      try {
+        await onePassword.enable();
+        if (scriptsUsed) throw new Error('このセッションでは任意JavaScriptが実行されています。すべてのページを終了して開き直してから1Passwordを導入してください。');
+        await onePassword.install();
+        await openExtensionTab(view, 'app/app.html#/page/welcome');
+      } catch (error) { await dialog.showMessageBox(view.window, { type: 'error', message: '1Passwordを開けませんでした', detail: error.message }); }
+      break;
+    case 'one-password-menu':
+      if (entry?.partition !== 'persist:project' || !onePassword.state.installed) break;
+      Menu.buildFromTemplate([
+        { label: '1Passwordの設定', click: () => { void openExtensionTab(view, 'app/app.html#/page/settings').catch(error => dialog.showMessageBox(view.window, { type: 'error', message: error.message })); } },
+        { label: '1Passwordを更新', enabled: !onePassword.state.busy, click: () => { void onePassword.install(true).catch(error => dialog.showMessageBox(view.window, { type: 'error', message: '1Passwordを更新できませんでした', detail: error.message })); } },
+      ]).popup({ window: view.window });
+      break;
     case 'switch': {
       const next = entries.get(args.page);
       if (!next || next.view !== view || !view.tabs.includes(next.id)) throw new Error('Unknown shown page');
@@ -295,7 +337,51 @@ nativeTheme.on('updated', () => {
 app.on('before-quit', () => { quitting = true; });
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
+  // The library ships a bundled renderer API. Combine it with our bridge for Electron's sandboxed preload.
+  const actionPreload = await readFile(require.resolve('electron-chrome-extensions/browser-action'), 'utf8');
+  await writeFile(toolbarPreload, actionPreload + '\nmodule.exports.injectBrowserAction();\n' + await readFile(join(__dirname, 'ui/preload.cjs'), 'utf8'), { mode: 0o600 });
   installMenuShortcuts();
+  const projectSession = session.fromPartition('persist:project');
+  const entryFor = contents => [...entries.values()].find(entry => entry.content.webContents === contents);
+  const extensionSource = windowId => {
+    const focused = BaseWindow.getFocusedWindow();
+    const view = [...views.values()].find(view => view.window.id === windowId)
+      || [...views.values()].find(view => view.window === focused || view.window === focused?.getParentWindow());
+    const entry = entries.get(view?.active) || [...entries.values()].find(entry => entry.view === view)
+      || [...entries.values()].find(entry => entry.partition === 'persist:project');
+    if (!entry || entry.partition !== 'persist:project') throw new Error('No project tab is available for the extension');
+    return entry;
+  };
+  const createExtensionTab = async (details, view) => {
+    const source = extensionSource(details.windowId);
+    const url = new URL(details.url || 'about:blank');
+    if (!['http:', 'https:'].includes(url.protocol) && url.href !== 'about:blank'
+      && !(url.protocol === 'chrome-extension:' && url.host === extensionId)) throw new Error('Unsupported extension tab URL');
+    const child = make(randomUUID(), source.partition, source.id, { view, userOnly: isUserOnlyURL(url.href) });
+    try { await navigate(child, url.href); }
+    catch (error) { child.content.webContents.close({ waitForBeforeUnload: false }); throw error; }
+    if (details.active !== false) select(child, source.view.window.isVisible());
+    return [child.content.webContents, child.view.window];
+  };
+  openExtensionTab = (view, path) => createExtensionTab({ windowId: view.window.id, url: `chrome-extension://${extensionId}/${path}` });
+  onePassword = new OnePassword(projectSession, profile, {
+    createTab: details => createExtensionTab(details),
+    selectTab: contents => { const entry = entryFor(contents); if (entry && !registeringTab && entry.view.active !== entry.id) select(entry); },
+    removeTab: contents => { if (!contents.isDestroyed()) contents.close({ waitForBeforeUnload: false }); },
+    createWindow: async details => {
+      const source = extensionSource();
+      const view = createView(randomUUID());
+      try {
+        const urls = Array.isArray(details.url) ? details.url : [details.url || 'about:blank'];
+        for (const url of urls) await createExtensionTab({ url, windowId: source.view.window.id }, view);
+        return view.window;
+      } catch (error) { if (!view.window.isDestroyed()) view.window.destroy(); throw error; }
+    },
+    removeWindow: window => {
+      for (const entry of entries.values()) if (entry.view.window === window) entry.content.webContents.close({ waitForBeforeUnload: false });
+    },
+    requestPermissions: async () => false,
+  }, refresh);
   const flush = await preserveSessionCookies(session.fromPartition('persist:project'), join(profile, 'session-cookies.enc'), () => { output({ event: 'fatal', message: 'Cannot securely preserve session cookies' }); app.exit(1); });
   output({ ready: true });
   readline.createInterface({ input: process.stdin }).on('line', line => { void (async () => {
@@ -304,7 +390,32 @@ app.whenReady().then(async () => {
       message = JSON.parse(line);
       let result;
       switch (message.action) {
-        case 'open': { const entry = make(message.page, message.partition, undefined, {}, message.owner); await entry.content.webContents.loadURL('about:blank'); result = true; break; }
+        case 'policy': {
+          const entry = entries.get(message.page);
+          if (!entry) throw new Error('Page is closed');
+          if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
+          const enabled = entry.partition === 'persist:project' && onePassword.enabled;
+          if (message.operation === 'evaluate_script') {
+            if (enabled) throw new Error('Arbitrary JavaScript is disabled in sessions with 1Password enabled. Use inspect_page, click and fill.');
+            scriptsUsed = true;
+          }
+          if (!enabled) { result = { enabled: false }; break; }
+          entry.privacy ||= new PagePrivacy(entry.content.webContents);
+          const report = await entry.privacy.report();
+          if (report.entered) throw privacyError();
+          if (message.operation === 'take_screenshot' && (report.passwords || report.privateFrames)) throw privacyError();
+          if (message.version !== undefined && message.version !== report.version) throw new Error('The page changed during this operation. No content was returned; inspect the page again.');
+          result = { enabled: true, ...report }; break;
+        }
+        case 'open': {
+          const entry = make(message.page, message.partition, undefined, {}, message.owner);
+          await entry.content.webContents.loadURL('about:blank');
+          if (message.partition === 'persist:project') {
+            extensionsLoaded ||= onePassword.loadInstalled().catch(error => { onePassword.error = error.message; refresh(); });
+            await extensionsLoaded;
+          }
+          result = true; break;
+        }
         case 'navigate': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); await navigate(entry, validateURL(message.url)); result = true; break; }
         case 'show': { const entry = entries.get(message.page); if (!entry) throw new Error('Page is closed'); select(entry, true); result = true; break; }
         case 'close': entries.get(message.page)?.content.webContents.close({ waitForBeforeUnload: false }); result = true; break;
@@ -312,19 +423,27 @@ app.whenReady().then(async () => {
         case 'capture': {
           const entry = entries.get(message.page);
           if (!entry) throw new Error('Page is closed');
+          if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
+          const protectedSession = entry.partition === 'persist:project' && onePassword.enabled;
+          const before = protectedSession ? await (entry.privacy ||= new PagePrivacy(entry.content.webContents)).report() : null;
+          if (before && (before.passwords || before.privateFrames)) throw privacyError();
           const bounds = entry.content.getBounds();
           try {
             entry.content.setBounds({ ...bounds, width: message.width, height: message.height });
             await entry.content.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))');
             const image = await entry.content.webContents.capturePage();
             if (image.isEmpty()) throw new Error('Browser capture returned an empty image');
+            if (before) {
+              const after = await entry.privacy.report();
+              if (after.passwords || after.privateFrames || after.version !== before.version || entry.userOnly) throw privacyError();
+            }
             result = image.resize({ width: Math.round(message.width * message.scale), height: Math.round(message.height * message.scale) }).toPNG().toString('base64');
           } finally {
             if (!entry.content.webContents.isDestroyed()) entry.content.setBounds(bounds);
           }
           break;
         }
-        case 'list': result = [...entries.values()].map(e => ({ ...pageState(e), visible: isShown(e) })); break;
+        case 'list': result = [...entries.values()].filter(entry => !entry.userOnly && !isUserOnlyURL(entry.content.webContents.getURL())).map(e => ({ ...pageState(e), visible: isShown(e) })); break;
         case 'quit':
           quitting = true;
           for (const entry of entries.values()) entry.content.webContents.close({ waitForBeforeUnload: false });

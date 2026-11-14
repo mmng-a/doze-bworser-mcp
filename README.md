@@ -27,6 +27,14 @@ Shortcuts are registered through Electron menu accelerators. macOS uses applicat
 
 The controls follow the OS light/dark setting with a monochrome palette. Inactive tabs have both a background and a border.
 
+In persistent profiles, the “1P” button installs the official 1Password Chrome extension. The first use opens 1Password's setup tab; the extension handles subsequent button clicks. Right-click the button for settings and updates. The extension and its account data use each project's storage and are separate from your regular Chrome profile. Extensions are unavailable in temporary sessions. To use the extension independently, turn off desktop app integration in its settings. Touch ID integration has not been verified.
+
+Once 1Password is enabled for a profile, arbitrary JavaScript through `evaluate_script` is disabled. Normal inspection, clicks and input continue through existing element IDs. Installation is refused if arbitrary JavaScript has already run in that browser session; close all pages and reopen the browser before installing. The restriction persists across restarts, including after an installation failure.
+
+Inspection omits password values and actionable IDs for password fields, and omits the entire contents of 1Password suggestion frames. Fields are identified by `type="password"` or `autocomplete="current-password"`/`new-password`; protection survives visibility toggles in the same document. Screenshots are refused while password fields or suggestion frames exist. Page inspection and operations are refused while a password field has a value. Operations resume when the fields are removed or emptied, even without a URL change. Results are also discarded if relevant changes occur during acquisition.
+
+Extension documents and pages on 1Password domains are reserved for the user and excluded from AI listing, inspection, capture and operations. Tabs that become user-only, and their child tabs, stay user-only. Users can still access the extension from the toolbar. This protection applies to doze's MCP operations; it does not restrict a shell or separate screen capture tools running as the same OS user. Custom secret inputs without standard password attributes are outside the detection scope.
+
 | Action | macOS | Linux |
 | --- | --- | --- |
 | Edit URL | Command+L | Ctrl+L |

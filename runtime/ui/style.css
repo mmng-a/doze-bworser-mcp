@@ -35,6 +35,9 @@ input { width: 100%; height: 34px; padding: 0 12px; border: 1px solid var(--bord
 .tab-address input { height: 28px; border: 0; background: transparent; font-size: 12px; }
 #overflow { flex: 0 0 30px; width: 30px; height: 30px; border: 0; border-radius: 7px; padding: 0; appearance: none; text-align: center; color: var(--muted); background: transparent; cursor: pointer; }
 #overflow:hover { background: var(--hover); }
+#one-password { flex-shrink: 0; font-size: 11px; font-weight: 600; }
+#extension-actions { flex-shrink: 0; filter: grayscale(1); -webkit-app-region: no-drag; --browser-action-hover-bg: var(--hover); }
+#extension-actions::part(action):focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 main { height: calc(100vh - 48px); }
 [hidden] { display: none !important; }
 #modal { height: 100%; display: grid; place-items: center; padding: 32px; }

@@ -9,7 +9,7 @@ import { BrowserManager } from './browser.mjs';
 import { PendingDialog } from './controller.mjs';
 
 const enabled = !!process.env.DOZE_BROWSER_ELECTRON;
-async function setup(t, nativeMenu = false) {
+async function setup(t, nativeMenu = false, extensionFixture = false, privacyFixture = false) {
   const folder = await mkdtemp(join(tmpdir(), 'doze electron 日本語 '));
   const server = createServer((req, res) => {
     if (req.url.startsWith('/favicon.svg')) {
@@ -18,6 +18,7 @@ async function setup(t, nativeMenu = false) {
       return;
     }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (req.url === '/privacy-frame') { res.end('<label>Frame password<input type="password" autocomplete="current-password"></label>'); return; }
     res.end('<title>共同操作</title><link rel="icon" href="/favicon.svg"><input aria-label="Name"><button onclick="window.child=window.open(\'/early\',\'child\',\'width=500,height=400\')">Popup</button><script>window.marker=crypto.randomUUID();</script>' +
       (req.url === '/early' ? '<script>window.reply=prompt("初回の入力","初期値");window.done=true;</script>' : ''));
   });
@@ -29,9 +30,21 @@ async function setup(t, nativeMenu = false) {
     const wrapper = join(folder, 'native-menu.cjs');
     errorLog = join(folder, 'native-menu-error.log');
     await writeFile(wrapper, `process.on('uncaughtException', error => { require('node:fs').appendFileSync(${JSON.stringify(errorLog)}, error.stack); process.exit(1); });
-const { app, BaseWindow, Menu, webContents, nativeTheme } = require('electron');
-${nativeMenu ? `app.on('web-contents-created', (_event, contents) => {
+const { app, BaseWindow, Menu, webContents, nativeTheme, session, dialog } = require('electron');
+${privacyFixture === true ? `require('node:fs').writeFileSync(require('node:path').join(process.env.DOZE_ELECTRON_PROFILE,'one-password-enabled'), '');` : ''}
+${privacyFixture === 'install' ? `dialog.showMessageBox = async (_window, options) => { require('node:fs').writeFileSync(${JSON.stringify(errorLog + '.install')}, options.detail || ''); return { response:0 }; };` : ''}
+${nativeMenu || extensionFixture || privacyFixture ? `app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (_event, _level, message) => {
+    if (message === 'test-capture-race') {
+      const capture = contents.capturePage.bind(contents);
+      contents.capturePage = async (...args) => {
+        contents.capturePage = capture;
+        await contents.executeJavaScript('window.racePassword=document.body.appendChild(document.createElement("input"));racePassword.id="race-password";racePassword.type="password";racePassword.value="SYNTHETIC_CAPTURE_SECRET"');
+        try { return await capture(...args); }
+        finally { await contents.executeJavaScript('document.getElementById("race-password").remove()'); }
+      };
+    }
+    ${extensionFixture ? `if (message.startsWith('test-load-extension:')) session.fromPartition('persist:project').extensions.loadExtension(message.slice(20)).catch(error => { throw error; });` : ''}
     if (message === 'test-menu-state') contents.executeJavaScript('window.menuState=' + JSON.stringify(Menu.getApplicationMenu().items.map(item => ({label:item.label, visible:item.visible, items:item.submenu?.items.map(child => ({role:child.role, accelerator:child.accelerator}))}))));
     if (message.startsWith('test-native-theme:')) nativeTheme.themeSource = message.slice(18);
     if (message.startsWith('test-native-menu:')) {
@@ -64,6 +77,142 @@ require(${JSON.stringify(main)});`);
   });
   return { manager, caller: { thread: 'one', connection: 'one', cwd: folder }, url: 'http://127.0.0.1:' + server.address().port };
 }
+
+test('Electron extensions: MV3 browser APIs, content messaging and inherited hidden tab ownership', { skip: !enabled || process.platform === 'win32', timeout: 30_000 }, async t => {
+  const { manager, caller, url } = await setup(t, false, true);
+  const folder = await mkdtemp(join(tmpdir(), 'doze-extension-fixture-'));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  await writeFile(join(folder, 'manifest.json'), JSON.stringify({
+    manifest_version: 3, name: 'doze API integration test', version: '1.0', permissions: ['tabs'],
+    background: { service_worker: 'worker.js', type: 'module' },
+    host_permissions: ['http://127.0.0.1/*'],
+    content_scripts: [{ matches: ['http://127.0.0.1/*'], js: ['content.js'] }],
+  }));
+  await writeFile(join(folder, 'content.js'), `chrome.runtime.sendMessage({probe:true}, reply => { document.documentElement.dataset.extensionReply = JSON.stringify(reply); });`);
+  await writeFile(join(folder, 'worker.js'), `
+chrome.runtime.onMessage.addListener((message, _sender, reply) => {
+  if (message.probe) reply({alias:browser===chrome,windows:typeof browser.windows.getAll,tabs:typeof browser.tabs.create});
+});
+
+
+(async () => {
+  const source = (await browser.tabs.query({})).find(tab => tab.url === ${JSON.stringify(url + '/')});
+  await browser.tabs.create({url:${JSON.stringify(url + '/extension')},windowId:source.windowId,active:false});
+})();`);
+  const first = await manager.call(caller, 'open_page', { url });
+  const record = manager.pages.get(first.page_id);
+  await record.page.evaluate(path => console.log('test-load-extension:' + path), folder);
+  await waitFor(() => manager.pages.size === 2);
+  const child = [...manager.pages.values()].find(page => page.id !== first.page_id);
+  await waitFor(() => !!child.page);
+  await child.page.waitForFunction(() => !!document.documentElement.dataset.extensionReply, { timeout: 5000 });
+  assert.deepEqual(await child.page.evaluate(() => JSON.parse(document.documentElement.dataset.extensionReply)), { alias: true, windows: 'function', tabs: 'function' });
+  assert.equal(child.entry.opener, first.page_id);
+  await assert.rejects(manager.call({ thread: 'other' }, 'inspect_page', { page_id: child.id }), /Page is closed/);
+  assert.ok((await record.engine.request('list')).every(page => !page.visible));
+  await manager.call(caller, 'close_page', first);
+  assert.equal(manager.pages.size, 0);
+});
+
+test('Electron privacy: safe element operations, password redaction, SPA changes, shadow DOM and conditional capture', { skip: !enabled || process.platform === 'win32', timeout: 45_000 }, async t => {
+  const { manager, caller, url } = await setup(t, false, false, true);
+  const first = await manager.call(caller, 'open_page', { url });
+  const record = manager.pages.get(first.page_id);
+  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression: 'window.unsafeProbe = true' }), /Arbitrary JavaScript is disabled/);
+  assert.equal(await record.page.evaluate(() => window.unsafeProbe), undefined);
+  let snapshot = await manager.call(caller, 'inspect_page', first);
+  const nameId = snapshot.match(/uid=(\S+) textbox "Name"/)[1];
+  await manager.call(caller, 'fill', { ...first, element: nameId, value: 'ordinary input' });
+  assert.ok((await manager.call(caller, 'take_screenshot', first)).image);
+  // Synthetic values only: this fixture never loads the user's extension or account.
+  await record.page.evaluate(() => {
+    window.dynamicPassword = document.body.appendChild(document.createElement('input'));
+    dynamicPassword.type = 'password'; dynamicPassword.type = 'text'; dynamicPassword.value = 'SYNTHETIC_DYNAMIC_SECRET';
+  });
+  await assert.rejects(manager.call(caller, 'inspect_page', first), /protected/);
+  await record.page.evaluate(() => dynamicPassword.remove());
+  await record.page.evaluate(() => {
+    const host = document.body.appendChild(document.createElement('div'));
+    window.fixtureShadow = host.attachShadow({ mode: 'closed' });
+    fixtureShadow.innerHTML = '<label>Private credential<input type="password" autocomplete="current-password"></label>';
+  });
+  snapshot = await manager.call(caller, 'inspect_page', first);
+  assert.match(snapshot, /Password \(protected\)/);
+  assert.doesNotMatch(snapshot, /uid=\S+ textbox "Private credential"/);
+  await assert.rejects(manager.call(caller, 'take_screenshot', first), /protected/);
+  await record.page.evaluate(() => fixtureShadow.querySelector('input').value = 'SYNTHETIC_SECRET_DO_NOT_RETURN');
+  await assert.rejects(manager.call(caller, 'inspect_page', first), /protected/);
+  await record.page.evaluate(() => fixtureShadow.querySelector('input').type = 'text');
+  await assert.rejects(manager.call(caller, 'inspect_page', first), /protected/);
+  await assert.rejects(manager.call(caller, 'fill', { ...first, element: nameId, value: 'blocked' }), /protected/);
+  await record.page.evaluate(() => fixtureShadow.querySelector('input').value = '');
+  snapshot = await manager.call(caller, 'inspect_page', first);
+  assert.match(snapshot, /Password \(protected\)/);
+  assert.doesNotMatch(snapshot, /SYNTHETIC_SECRET/);
+  await record.page.evaluate(() => fixtureShadow.host.remove());
+  assert.ok((await manager.call(caller, 'take_screenshot', first)).image);
+  await record.page.evaluate(frameURL => { const frame = document.body.appendChild(document.createElement('iframe')); frame.src = frameURL; }, url.replace('127.0.0.1', 'localhost') + '/privacy-frame');
+  await record.page.waitForFunction(() => document.querySelector('iframe')?.contentWindow);
+  await waitFor(async () => record.page.frames().some(frame => frame.url().endsWith('/privacy-frame')));
+  await record.page.frames().find(frame => frame.url().endsWith('/privacy-frame')).waitForSelector('input');
+  snapshot = await manager.call(caller, 'inspect_page', first);
+  assert.match(snapshot, /Password \(protected\)/);
+  await assert.rejects(manager.call(caller, 'take_screenshot', first), /protected/);
+  await record.page.evaluate(() => document.querySelector('iframe').remove());
+  assert.ok((await manager.call(caller, 'take_screenshot', first)).image);
+  await record.page.evaluate(() => console.log('test-capture-race'));
+  await assert.rejects(manager.call(caller, 'take_screenshot', first), /protected|page changed/);
+  assert.ok((await manager.call(caller, 'take_screenshot', first)).image);
+});
+
+test('Electron privacy: private frames and documents cannot be read or listed', { skip: !enabled || process.platform === 'win32', timeout: 30_000 }, async t => {
+  const { manager, caller, url } = await setup(t, false, false, true);
+  const first = await manager.call(caller, 'open_page', { url });
+  const record = manager.pages.get(first.page_id);
+  await record.page.setRequestInterception(true);
+  record.page.on('request', request => {
+    if (request.url().startsWith('https://private.1password.com/')) void request.respond({ status: 200, contentType: 'text/html', body: '<title>SYNTHETIC_PRIVATE_TITLE</title><p>SYNTHETIC_VAULT_ITEM</p>' });
+    else void request.continue();
+  });
+  await record.page.evaluate(() => { const frame = document.body.appendChild(document.createElement('iframe')); frame.src = 'https://private.1password.com/fixture'; });
+  await waitFor(() => record.page.frames().some(frame => frame.url().startsWith('https://private.1password.com/')));
+  const text = await manager.call(caller, 'inspect_page', first);
+  assert.match(text, /Protected content/);
+  assert.doesNotMatch(text, /SYNTHETIC_PRIVATE|SYNTHETIC_VAULT/);
+  await assert.rejects(manager.call(caller, 'take_screenshot', first), /protected/);
+  await record.page.evaluate(() => document.querySelector('iframe').remove());
+  await assert.rejects(manager.call(caller, 'open_page', { url: 'https://private.1password.com/' }), /reserved for the user/);
+  await record.page.goto('https://private.1password.com/fixture');
+  assert.deepEqual(await manager.call(caller, 'list_pages', {}), []);
+  await assert.rejects(manager.call(caller, 'inspect_page', first), /reserved for the user/);
+  await assert.rejects(manager.call(caller, 'take_screenshot', first), /reserved for the user/);
+});
+
+test('Electron privacy: enabling after arbitrary execution requires a new browser session and stays enabled', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 30_000 }, async t => {
+  const { manager, caller, url } = await setup(t, false, false, 'install');
+  const first = await manager.call(caller, 'open_page', { url });
+  const record = manager.pages.get(first.page_id);
+  await manager.call(caller, 'evaluate_script', { ...first, expression: 'window.syntheticListener = true' });
+  await record.page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<input aria-label="Synthetic password" type="password">'));
+  const oldSnapshot = await manager.call(caller, 'inspect_page', first);
+  const oldPasswordId = oldSnapshot.match(/uid=(\S+) textbox "Synthetic password"/)[1];
+  await manager.call(caller, 'show_page', first);
+  const ui = await record.engine.page({ targetId: record.entry.uiTargetId });
+  const snapshot = record.page.accessibility.snapshot.bind(record.page.accessibility);
+  record.page.accessibility.snapshot = async options => {
+    const value = await snapshot(options);
+    await ui.evaluate(() => window.doze.act('one-password'));
+    return value;
+  };
+  await assert.rejects(manager.call(caller, 'inspect_page', first), /protection was enabled/);
+  record.page.accessibility.snapshot = snapshot;
+  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), /Arbitrary JavaScript is disabled/);
+  await assert.rejects(manager.call(caller, 'click', { ...first, element: oldPasswordId }), /protected|Unknown element/);
+  await manager.call(caller, 'close_page', first);
+  const second = await manager.call(caller, 'open_page', { url });
+  await assert.rejects(manager.call(caller, 'evaluate_script', { ...second, expression: '1' }), /Arbitrary JavaScript is disabled/);
+  assert.match(await manager.call(caller, 'inspect_page', second), /textbox "Name"/);
+});
 
 test('Electron: hidden pages, initial popup prompt, inherited ownership and native screenshot', { skip: !enabled, timeout: 45_000 }, async t => {
   const { manager, caller, url } = await setup(t);
@@ -251,7 +400,7 @@ test('Electron tabs: compact single-row layout, overflow selection and favicon',
   await ui.waitForFunction(id => document.querySelector('.tab.active').dataset.page === id, {}, pages[1].page_id);
   const geometry = () => {
     const header = document.querySelector('header').getBoundingClientRect();
-    const last = document.querySelector('#overflow').hidden ? document.querySelector('#tabs') : document.querySelector('#overflow');
+    const last = [...document.querySelector('header').children].findLast(element => !element.hidden);
     return { clientWidth: document.documentElement.clientWidth, leftDragSpace: document.querySelector('.tab').getBoundingClientRect().left - document.querySelector('#tabs').getBoundingClientRect().left, rightPadding: innerWidth - last.getBoundingClientRect().right, height: header.height, width: innerWidth, dragSpace: document.querySelector('#tabs').getBoundingClientRect().right - document.querySelector('.tab:last-child').getBoundingClientRect().right, tabs: [...document.querySelectorAll('.tab')].map(tab => { const rect = tab.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, active: tab.classList.contains('active') }; }) };
   };
   const normal = await ui.evaluate(geometry);

@@ -4,6 +4,7 @@ import { inspect } from './snapshot.mjs';
 import { workspaceKey, prepareProfile, GitRootMismatch } from './profiles.mjs';
 import { ElectronEngine } from './electron-engine.mjs';
 import { join } from 'node:path';
+import { isUserOnlyURL } from './privacy.cjs';
 
 /** Use Puppeteer's selection API for native options, preserving ordinary widget clicks. */
 async function selectOption(handle) {
@@ -32,6 +33,7 @@ async function selectOption(handle) {
 
 
 export function validateUrl(value) {
+  if (isUserOnlyURL(value)) throw new Error('1Password pages are reserved for the user. Open 1Password from the toolbar.');
   const url = new URL(value);
   if (value !== 'about:blank' && !['http:', 'https:'].includes(url.protocol)) throw new Error('url must be HTTP(S) or about:blank');
   return value;
@@ -168,6 +170,7 @@ export class BrowserManager {
     record.controller = new PageController(entry, () => this.dispose(record), this.timeout);
     entry.on('dialog-closed', () => record.controller.syncDialog());
     entry.once('close', () => { void record.controller.close(); });
+    entry.on('protected', () => record.controller.nodes.clear());
     record.group.pages.add(record.id);
     this.pages.set(record.id, record);
     record.ready = engine.page(entry).then(page => { record.page = page; record.controller.page = page; return page; });
@@ -177,6 +180,7 @@ export class BrowserManager {
   get(caller, id) {
     const record = this.pages.get(id);
     if (!record || record.owner !== caller.thread || record.controller.closed) throw new PageClosed();
+    if (record.entry.userOnly) throw new Error('This page is reserved for the user.');
     return record;
   }
   async call(caller, name, args, signal) {
@@ -201,6 +205,27 @@ export class BrowserManager {
     return record.controller.run(() => this.perform(record, name, args), signal);
   }
   async perform(record, name, args) {
+    const policy = await record.engine.request('policy', { page: record.id, operation: name });
+    record.controller.privacy = policy.enabled ? policy : null;
+    if (policy.enabled && ['click', 'fill'].includes(name)) {
+      const node = record.controller.nodes.get(args.element);
+      if (node && policy.redact.some(blocked => blocked.backendNodeId === node.backendNodeId && blocked.loaderId === node.loaderId)) throw new Error('This element is protected for user input.');
+    }
+    let result;
+    let failed = false;
+    let failure;
+    try { result = await this.operate(record, name, args); }
+    catch (error) { failed = true; failure = error; }
+    const after = await record.engine.request('policy', { page: record.id, operation: name === 'evaluate_script' ? 'check' : name,
+      ...(['inspect_page', 'take_screenshot'].includes(name) && policy.enabled ? { version: policy.version } : {}) });
+    if (after.enabled && !policy.enabled) {
+      record.controller.nodes.clear();
+      throw new Error('1Password protection was enabled during this operation. No content was returned; inspect the page again.');
+    }
+    if (failed) throw failure;
+    return result;
+  }
+  async operate(record, name, args) {
     const page = await record.ready;
     const { controller } = record;
     switch (name) {

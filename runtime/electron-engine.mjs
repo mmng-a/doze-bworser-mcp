@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
+import { isUserOnlyURL } from './privacy.cjs';
 
 /** Carry CDP over inherited pipes; the browser never listens on a TCP port. */
 class PipeTransport {
@@ -88,7 +89,11 @@ export class ElectronEngine extends EventEmitter {
     } else {
       const entry = this.entries.get(message.page);
       if (!entry) return;
-      if (message.event === 'dialog') {
+      if (message.event === 'protected') {
+        entry.userOnly = true;
+        entry.emit('protected');
+      } else if (message.event === 'dialog') {
+        if (entry.userOnly) return;
         const dialog = {
           id: message.dialog, handled: false, type: () => message.type, message: () => message.message,
           defaultValue: () => message.defaultValue,
@@ -122,7 +127,7 @@ export class ElectronEngine extends EventEmitter {
   }
   async page(entry) {
     const target = await this.browser.waitForTarget(async target => {
-      if (target.type() !== 'page') return false;
+      if (target.type() !== 'page' || isUserOnlyURL(target.url())) return false;
       let session;
       try {
         session = await target.createCDPSession();

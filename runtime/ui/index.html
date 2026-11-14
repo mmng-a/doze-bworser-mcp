@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https: http:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http: crx:;">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>doze</title>
   <link rel="stylesheet" href="style.css">
@@ -16,6 +16,8 @@
   </nav>
   <div id="tabs" role="tablist" aria-label="共同操作のページ"></div>
   <select id="overflow" aria-label="ほかのページ" title="ほかのページ" hidden></select>
+  <button id="one-password" aria-label="1Password" title="1Passwordをインストールして開く" hidden>1P</button>
+  <browser-action-list id="extension-actions" partition="persist:project" alignment="bottom left" aria-label="1Password" hidden></browser-action-list>
 </header>
 <template id="tab-template">
   <div class="tab">
