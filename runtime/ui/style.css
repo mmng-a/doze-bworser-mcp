@@ -59,7 +59,7 @@ html.annotating { background: transparent; }
 #annotation-form .actions button { height: 26px; min-width: 54px; padding: 0 10px; font-size: 12px; }
 #annotation-form .actions #annotation-adjust { display: grid; place-items: center; width: 28px; min-width: 28px; padding: 0; margin-right: auto; color: var(--muted); }
 #annotation-adjust[aria-expanded="true"] { background: var(--hover); color: var(--text); }
-#adjust-controls { max-height: 380px; overflow-y: auto; margin-top: 12px; border-top: 1px solid var(--border); font-size: 12px; }
+#adjust-controls { max-height: 380px; overflow-y: auto; scrollbar-width: thin; scrollbar-gutter: stable; padding-right: 6px; margin-top: 12px; border-top: 1px solid var(--border); font-size: 12px; }
 #adjust-controls details { padding: 8px 0; border-bottom: 1px solid var(--border); }
 #adjust-controls summary { padding: 4px 0; color: var(--muted); cursor: pointer; }
 .adjust-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 8px; padding-top: 8px; }
@@ -84,23 +84,21 @@ html.annotating { background: transparent; }
 .adjust-choices button[aria-pressed="true"] { color: var(--on-primary); background: var(--text); border-color: var(--text); }
 .adjust-choice-current { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
 #adjust-reset { margin-top: 8px; padding: 0 4px; font-size: 11px; color: var(--muted); }
-.box-model-margin { position: relative; height: 228px; border: 1px dashed var(--border); border-radius: 10px; background: var(--background); }
-.box-model-padding { position: absolute; inset: 34px 42px; border: 1px solid var(--border); border-radius: 7px; background: var(--tab); }
-.box-model-content { position: absolute; inset: 34px 32px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--active); }
+.box-model-margin { position: relative; height: 204px; border: 1px dashed var(--border); border-radius: 10px; background: var(--background); }
+.box-model-padding { position: absolute; inset: 38px 56px; border: 1px solid var(--border); border-radius: 7px; background: var(--tab); }
 .box-model-tag { position: absolute; left: 7px; top: 5px; color: var(--muted); font: 9px ui-monospace, monospace; }
 .box-model-unit { position: absolute; right: 7px; top: 5px; color: var(--muted); font: 9px ui-monospace, monospace; }
-.box-model-content > .box-model-tag { position: static; }
 .box-model-margin label > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
-.box-model-margin .box-side { position: absolute; width: 38px; }
-.box-model-margin .box-top, .box-model-margin .box-bottom { left: 50%; width: 54px; transform: translateX(-50%); }
-.box-model-margin .box-top { top: 5px; }
-.box-model-margin .box-bottom { bottom: 5px; }
+.box-model-margin .box-side { position: absolute; width: 54px; }
+.box-model-margin .box-top, .box-model-margin .box-bottom { left: 50%; width: 72px; transform: translateX(-50%); }
+.box-model-margin .box-top { top: 4px; }
+.box-model-margin .box-bottom { bottom: 4px; }
 .box-model-margin .box-left, .box-model-margin .box-right { top: 50%; transform: translateY(-50%); }
 .box-model-margin .box-left { left: 1px; }
 .box-model-margin .box-right { right: 1px; }
-.box-model-padding .box-left, .box-model-padding .box-right { width: 30px; }
-.box-model-margin input { height: 22px; padding: 0 1px; border-color: transparent; background: transparent; text-align: center; font: 10px ui-monospace, monospace; }
-.box-model-margin input:hover { background: var(--hover); }
+.box-model-padding .box-left, .box-model-padding .box-right { width: 64px; }
+.box-model-margin input { height: 28px; padding: 0 3px; border-color: transparent; background: transparent; text-align: center; font: 12px ui-monospace, monospace; }
+.box-model-margin input:hover { background: var(--hover); border-color: var(--border); }
 .box-model-margin input:focus-visible { background: var(--active); }
 .adjust-grid input[data-scrubbable="true"]:not(:focus), .adjust-grid label:has(input[data-scrubbable="true"]) > .adjust-scrub-label { cursor: ew-resize; }
 .adjust-scrubbing, .adjust-scrubbing * { cursor: ew-resize !important; user-select: none !important; }

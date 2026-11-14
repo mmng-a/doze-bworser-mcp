@@ -441,6 +441,16 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   assert.equal(await ui.$eval('#adjust-width', input => input.closest('.box-model-margin')),null);
   assert.ok(await ui.$eval('#adjust-width', input => { const rect=input.getBoundingClientRect(); const panel=input.closest('#adjust-controls').getBoundingClientRect(); return rect.width>=100 && rect.bottom<=panel.bottom; }), 'size fields have enough width and are visible outside the spacing diagram');
   assert.equal(await ui.$eval('#adjust-color',input=>input.closest('details').dataset.adjustGroup),'文字');
+  assert.ok(await ui.$eval('#adjust-width', input => {
+    const diagram = document.querySelector('.box-model-margin');
+    return input.closest('details') === diagram.closest('details') && input.getBoundingClientRect().bottom < diagram.getBoundingClientRect().top;
+  }), 'size fields precede the spacing diagram in the same section');
+  assert.ok(await ui.$eval('#adjust-padding-left', input => {
+    const rect = input.getBoundingClientRect(); const other = document.getElementById('adjust-padding-right').getBoundingClientRect();
+    return rect.width >= 60 && rect.height >= 28 && rect.right <= other.left;
+  }), 'spacing inputs use the free center without overlapping');
+  for (const key of ['color', 'background-color']) assert.ok(await ui.$eval('#adjust-' + key, input => input.closest('label').classList.contains('adjust-wide')), 'color controls use the full row');
+  assert.equal(await ui.$eval('#adjust-color', input => input.closest('label').parentElement.lastElementChild.contains(input)), true, 'text color follows the typography controls');
   await scrub('#adjust-padding-left',8);
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).paddingLeft === '18px');
   await change('margin-top', '12');
@@ -459,6 +469,8 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   await ui.locator('#adjust-controls details[data-adjust-group="色・形"] summary').click();
   await ui.$eval('input[type=color][aria-label="文字色を選択"]', input => { input.value='#cc2233'; input.dispatchEvent(new Event('input',{bubbles:true})); });
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).color === 'rgb(204, 34, 51)');
+  await ui.$eval('#adjust-color', input => input.scrollIntoView({block:'end'}));
+  await ui.screenshot({ path:join(tmpdir(),'doze-adjust-typography.png') });
   await ui.$eval('input[type=range][aria-label="不透明度を調整"]', input => { for (const value of ['10','20','35']) { input.value=value; input.dispatchEvent(new Event('input',{bubbles:true})); } });
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).opacity === '0.35');
   await ui.locator('#adjust-controls details[data-adjust-group="配置"] summary').click();
@@ -470,7 +482,7 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).flexDirection === 'column');
   await ui.locator('label:has(#adjust-align-items) button[aria-label="中央"]').click();
   await record.page.waitForFunction(() => getComputedStyle(document.getElementById('adjust-target')).alignItems === 'center');
-  await ui.$eval('#adjust-controls', element => { element.querySelector('[data-adjust-group="余白"]').open=false; element.querySelector('[data-adjust-group="文字"]').open=false; element.scrollTop=0; });
+  await ui.$eval('#adjust-controls', element => { element.querySelector('[data-adjust-group="サイズ・余白"]').open=false; element.querySelector('[data-adjust-group="文字"]').open=false; element.scrollTop=0; });
   await ui.screenshot({ path:join(tmpdir(),'doze-adjust-visual-controls.png') });
   await ui.$eval('#adjust-controls', element => element.scrollTop=element.scrollHeight);
   await ui.screenshot({ path:join(tmpdir(),'doze-adjust-layout-controls.png') });

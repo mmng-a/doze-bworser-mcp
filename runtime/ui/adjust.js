@@ -1,12 +1,11 @@
 const adjustmentGroups = [
-  ['文字', [['text', 'テキスト', 'text'], ['color', '文字色', 'color'], ['font-family', 'フォント'], ['font-size', '文字サイズ', 'length'],
+  ['文字', [['text', 'テキスト', 'text'], ['font-family', 'フォント'], ['font-size', '文字サイズ', 'length'],
     ['font-weight', '太さ', ['normal', 'bold', '100', '200', '300', '400', '500', '600', '700', '800', '900']],
-    ['line-height', '行の高さ', 'length'], ['letter-spacing', '字間', 'length'], ['text-align', '揃え', ['start', 'left', 'center', 'right', 'justify', 'end']]]],
+    ['line-height', '行の高さ', 'length'], ['letter-spacing', '字間', 'length'], ['text-align', '揃え', ['start', 'left', 'center', 'right', 'justify', 'end']], ['color', '文字色', 'color']]],
   ['色・形', [['background-color', '背景色', 'color'], ['opacity', '不透明度'], ['border-radius', '角丸', 'length']]],
-  ['余白', [
+  ['サイズ・余白', [['width', '幅', 'length'], ['height', '高さ', 'length'],
     ['padding-top', '内側・上', 'length'], ['padding-right', '内側・右', 'length'], ['padding-bottom', '内側・下', 'length'], ['padding-left', '内側・左', 'length'],
     ['margin-top', '外側・上', 'length'], ['margin-right', '外側・右', 'length'], ['margin-bottom', '外側・下', 'length'], ['margin-left', '外側・左', 'length'], ['gap', '間隔', 'length']]],
-  ['サイズ', [['width', '幅', 'length'], ['height', '高さ', 'length']]],
   ['配置', [['display', '表示', ['block', 'inline', 'inline-block', 'flex', 'inline-flex', 'grid', 'inline-grid']],
     ['flex-direction', '方向', ['row', 'column', 'row-reverse', 'column-reverse']],
     ['align-items', '交差軸', ['normal', 'stretch', 'start', 'end', 'center', 'baseline', 'flex-start', 'flex-end']],
@@ -231,9 +230,9 @@ function enhanceAdjustment(input, key, kind, label) {
   } else control.append(input);
   return control;
 }
-for (const [title, fields] of ['余白','サイズ','文字','色・形','配置'].map(title => adjustmentGroups.find(group => group[0] === title))) {
-  const spacing = title === '余白';
-  const group = document.createElement('details'); group.open = spacing || title === 'サイズ'; group.dataset.adjustGroup = title;
+for (const [title, fields] of ['サイズ・余白','文字','色・形','配置'].map(title => adjustmentGroups.find(group => group[0] === title))) {
+  const spacing = title === 'サイズ・余白';
+  const group = document.createElement('details'); group.open = spacing; group.dataset.adjustGroup = title;
   const summary = document.createElement('summary'); summary.textContent = title; group.append(summary);
   const grid = document.createElement('div'); grid.className = 'adjust-grid';
   let margin, padding;
@@ -242,11 +241,10 @@ for (const [title, fields] of ['余白','サイズ','文字','色・形','配置
     margin.setAttribute('role', 'group'); margin.setAttribute('aria-label', '外側と内側の余白。単位はpx');
     const unit = document.createElement('span'); unit.className = 'box-model-unit'; unit.textContent = 'px'; margin.append(unit);
     padding = document.createElement('div'); padding.className = 'box-model-padding';
-    const content = document.createElement('div'); content.className = 'box-model-content';
-    for (const [element, text] of [[margin, 'margin'], [padding, 'padding'], [content, '要素']]) {
+    for (const [element, text] of [[margin, 'margin'], [padding, 'padding']]) {
       const tag = document.createElement('span'); tag.className = 'box-model-tag'; tag.textContent = text; element.append(tag);
     }
-    padding.append(content); margin.append(padding); grid.append(margin);
+    margin.append(padding);
   }
   for (const [key, title, kind] of fields) {
     const label = document.createElement('label'); const caption = document.createElement('span'); caption.textContent = title;
@@ -258,7 +256,7 @@ for (const [title, fields] of ['余白','サイズ','文字','色・形','配置
       const option=new Option(key==='font-weight'?`${weight[value]||choiceLabels[value]||value}${weight[value]?' '+value:''}`:choiceLabels[value]||value,value);if(key==='font-weight')option.style.fontWeight=value;input.add(option);
     }
     else { input.maxLength = kind === 'text' ? 4000 : 200; if (kind === 'length') input.placeholder = 'px'; }
-    if (kind === 'text' || key === 'font-family' || ['text-align','display','flex-direction','align-items','justify-content','opacity'].includes(key)) label.className = 'adjust-wide';
+    if (kind === 'text' || kind === 'color' || ['border-radius','gap'].includes(key) || key === 'font-family' || ['text-align','display','flex-direction','align-items','justify-content','opacity'].includes(key)) label.className = 'adjust-wide';
     input.oninput = () => {
       let value = input.value;
       if (kind === 'length' && /^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(value)) value += 'px';
@@ -268,8 +266,10 @@ for (const [title, fields] of ['余白','サイズ','文字','色・形','配置
     };
     input.onchange = () => { if (adjustmentDirty.has(key)) enqueueAdjustment(key); };
     if (kind === 'length' || key === 'opacity') makeAdjustmentScrubbable(input,caption,key);
-    label.append(caption, spacing ? input : enhanceAdjustment(input,key,kind,title));
-    if (spacing && /^(margin|padding)-/.test(key)) {
+    const side = spacing && /^(margin|padding)-/.test(key);
+    label.append(caption, side ? input : enhanceAdjustment(input,key,kind,title));
+    if (side) {
+      if (!margin.parentNode) grid.append(margin);
       label.className = 'box-side box-' + key.split('-')[1]; label.title = title;
       (key.startsWith('margin-') ? margin : padding).append(label);
     } else grid.append(label);
