@@ -31,6 +31,16 @@ async function setup(t, nativeMenu = false, extensionFixture = false, privacyFix
     errorLog = join(folder, 'native-menu-error.log');
     await writeFile(wrapper, `process.on('uncaughtException', error => { require('node:fs').appendFileSync(${JSON.stringify(errorLog)}, error.stack); process.exit(1); });
 const { app, BaseWindow, Menu, webContents, nativeTheme, session, dialog } = require('electron');
+${process.platform === 'darwin' && process.env.DOZE_TEST_BACKGROUND !== '0' ? `app.setActivationPolicy('accessory');
+const backgroundWindows = new WeakSet();
+BaseWindow.prototype.show = function () {
+  if (!backgroundWindows.has(this)) {
+    backgroundWindows.add(this);
+    this.on('focus', () => { throw new Error('Background test window unexpectedly gained focus'); });
+  }
+  this.setFocusable(false);
+  this.showInactive();
+};` : ''}
 ${privacyFixture === true ? `require('node:fs').writeFileSync(require('node:path').join(process.env.DOZE_ELECTRON_PROFILE,'one-password-enabled'), '');` : ''}
 ${privacyFixture === 'install' ? `dialog.showMessageBox = async (_window, options) => { require('node:fs').writeFileSync(${JSON.stringify(errorLog + '.install')}, options.detail || ''); return { response:0 }; };` : ''}
 ${nativeMenu || extensionFixture || privacyFixture ? `app.on('web-contents-created', (_event, contents) => {
@@ -285,10 +295,16 @@ test('Electron annotations: element and area comments, ownership, navigation and
   ui.setDefaultTimeout(5000);
   await ui.locator('#annotate').click();
   await ui.waitForFunction(() => !document.getElementById('annotation-layer').hidden);
+  assert.equal(await ui.$eval('#annotation-panel', element => element.hidden), true);
+  assert.equal(await ui.$eval('#annotation-status', element => element.hidden), false);
+  await ui.mouse.move(20, 100);
+  await ui.waitForFunction(() => document.getElementById('annotation-menu').hidden);
+  assert.equal(await ui.$eval('#annotation-menu', element => element.hidden), true);
+  assert.equal(await ui.$('#annotation-close'), null);
   assert.equal(await ui.$eval('html', element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
   const rect = await record.page.$eval('button', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, width:r.width, height:r.height }; });
   await ui.mouse.move(rect.x + rect.width / 2, 48 + rect.y + rect.height / 2);
-  await ui.waitForFunction(() => !document.getElementById('annotation-hover').hidden);
+  await ui.waitForFunction(() => !document.getElementById('annotation-hover').hidden && document.querySelector('#annotation-hover span').textContent === 'button');
   assert.equal(await ui.$eval('#annotation-hover span', element => element.textContent), 'button');
   assert.equal(await ui.$eval('#annotation-form', element => element.hidden), true);
   await ui.mouse.click(rect.x + rect.width / 2, 48 + rect.y + rect.height / 2);
@@ -296,6 +312,7 @@ test('Electron annotations: element and area comments, ownership, navigation and
   const popup = await ui.$eval('#annotation-panel', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, right:r.right, bottom:r.bottom }; });
   assert.ok(Math.abs(popup.x - rect.x) < 2, 'editor is anchored beside the selected element');
   assert.ok(popup.y >= 48 + rect.y + rect.height);
+  assert.ok(await ui.$eval('#annotation-form button[type=submit]', element => element.getBoundingClientRect().height < 30));
   assert.equal(await record.page.evaluate(() => fixtureClicks), 0, 'selection does not click the underlying page');
   const comment = '<script>synthetic</script> このボタンの余白を広げる';
   await ui.locator('#annotation-comment').fill(comment);
@@ -329,13 +346,16 @@ test('Electron annotations: element and area comments, ownership, navigation and
   const areas = await manager.call(caller, 'get_annotations', first);
   assert.equal(areas[1].kind, 'area'); assert.equal(areas[1].rect.width, 150); assert.equal(areas[1].rect.height, 80);
   await ui.screenshot({ path: join(tmpdir(), 'doze-annotations-ui.png') });
-  await ui.locator('#annotation-close').click();
+  await ui.locator('#annotate').click();
   assert.match(await manager.call(caller, 'inspect_page', first), /textbox "Name"/);
   await manager.call(caller, 'navigate_page', { ...first, url: url + '/next' });
   assert.ok((await manager.call(caller, 'get_annotations', first)).every(note => !note.current && note.url === url + '/'));
   await ui.locator('#annotate').click();
   await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 2);
   assert.equal(await ui.$$eval('.annotation-pin', pins => pins.length), 0);
+  await ui.hover('#annotate');
+  await ui.waitForFunction(() => !document.getElementById('annotation-menu').hidden);
+  await ui.hover('#annotation-menu');
   await ui.locator('#annotation-list li button').click();
   await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 1);
   assert.equal((await manager.call(caller, 'get_annotations', first)).length, 1);
