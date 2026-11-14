@@ -41,7 +41,8 @@
         <div class="annotation-target-row"><span id="annotation-target"></span><button id="annotation-delete" type="button" aria-label="この注釈を削除" title="注釈を削除" hidden>削除</button></div>
         <label class="sr-only" for="annotation-comment">コメント</label>
         <textarea id="annotation-comment" placeholder="この場所へのコメント" maxlength="4000" required></textarea>
-        <div class="actions"><button id="annotation-cancel" type="button">キャンセル</button><button class="primary" type="submit">保存</button></div>
+        <section id="adjust-controls" aria-label="見た目の調整" hidden></section>
+        <div class="actions"><button id="annotation-adjust" type="button" aria-expanded="false" aria-controls="adjust-controls">Adjust</button><button id="annotation-cancel" type="button">キャンセル</button><button class="primary" type="submit">保存</button></div>
       </form>
     </aside>
     <aside id="annotation-menu" aria-label="保存した注釈" hidden>
@@ -60,6 +61,7 @@
   <p id="error" role="status"></p>
 </main>
 <script src="app.js"></script>
+<script src="adjust.js"></script>
 <script src="annotations.js"></script>
 </body>
 </html>

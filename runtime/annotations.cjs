@@ -1,15 +1,15 @@
 const { randomUUID } = require('node:crypto');
 const { PagePrivacy, isUserOnlyURL, privacyError } = require('./privacy.cjs');
 
-async function withNode(privacy, frameId, backendNodeId, fn) {
+async function withNode(privacy, frameId, backendNodeId, fn, value) {
   const frame = privacy.frames.get(frameId);
   if (!frame) throw new Error('The selected element is no longer available');
   const session = privacy.documentSessions.get(frame.loaderId);
   const { object } = await privacy.send('DOM.resolveNode', { backendNodeId }, session);
   if (!object.objectId) throw new Error('The selected element is no longer available');
   try {
-    const result = await privacy.send('Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: fn.toString(), returnByValue: true }, session);
-    if (result.exceptionDetails) throw new Error('The selected element is no longer available');
+    const result = await privacy.send('Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: fn.toString(), arguments: value === undefined ? [] : [{ value }], returnByValue: true }, session);
+    if (result.exceptionDetails) throw new Error('The selected element changed. Select the target again.');
     return result.result.value;
   } finally { await privacy.send('Runtime.releaseObject', { objectId: object.objectId }, session); }
 }
@@ -36,7 +36,7 @@ async function bounds(privacy, frameId, backendNodeId) {
 const overlaps = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 
 /** Resolve a user selection without reading text, HTML, attributes containing values, or screenshots. */
-async function selectAnnotation(entry, selection) {
+async function selectAnnotation(entry, selection, allowEmpty = false) {
   const wc = entry.content.webContents;
   if (entry.userOnly || isUserOnlyURL(wc.getURL()) || entry.dialog) throw privacyError();
   const privacy = entry.privacy ||= new PagePrivacy(wc);
@@ -51,7 +51,7 @@ async function selectAnnotation(entry, selection) {
   let frameId = selection.frameId;
   let backendNodeId = selection.backendNodeId;
   if (selection.kind === 'element') {
-    if (!backendNodeId) ({ backendNodeId, frameId } = await privacy.send('DOM.getNodeForLocation', { x: Math.floor(rect.x), y: Math.floor(rect.y), includeUserAgentShadowDOM: true }));
+    if (!backendNodeId) ({ backendNodeId, frameId } = await privacy.send('DOM.getNodeForLocation', { x: Math.floor(rect.x), y: Math.floor(rect.y), includeUserAgentShadowDOM: false }));
     const frame = privacy.frames.get(frameId);
     if (!frame || isUserOnlyURL(frame.url) || isUserOnlyURL(frame.securityOrigin)
       || before.redact.some(node => node.loaderId === frame.loaderId && node.backendNodeId === backendNodeId)) throw privacyError();
@@ -66,8 +66,8 @@ async function selectAnnotation(entry, selection) {
       return { tag: this.localName, selector: parts.join(' > ') };
     });
   } else if (selection.kind !== 'area') throw new Error('Unknown annotation selection');
-  rect = { x: Math.max(0, rect.x), y: Math.max(0, rect.y), width: Math.min(rect.x + rect.width, limit.width) - Math.max(0, rect.x), height: Math.min(rect.y + rect.height, limit.height) - Math.max(0, rect.y) };
-  if (rect.width < 1 || rect.height < 1) throw new Error('Select a visible element or area');
+  rect = { x: Math.min(limit.width, Math.max(0, rect.x)), y: Math.min(limit.height, Math.max(0, rect.y)), width: Math.max(0, Math.min(rect.x + rect.width, limit.width) - Math.max(0, rect.x)), height: Math.max(0, Math.min(rect.y + rect.height, limit.height) - Math.max(0, rect.y)) };
+  if (!allowEmpty && (rect.width < 1 || rect.height < 1)) throw new Error('Select a visible element or area');
   for (const node of before.redact) {
     const frame = [...privacy.frames.values()].find(frame => frame.loaderId === node.loaderId);
     if (!frame) throw privacyError();
@@ -80,7 +80,7 @@ async function selectAnnotation(entry, selection) {
     document: entry.document, url: wc.getURL(), viewport: { width: limit.width, height: limit.height, scrollX: viewport.pageX, scrollY: viewport.pageY }, zoom };
 }
 function publicAnnotation(note, entry) {
-  const { frameId, backendNodeId, document, zoom, editId, ...result } = note;
+  const { frameId, backendNodeId, document, zoom, editId, adjustmentKey, adjustmentOrder, adjust, ...result } = note;
   return { ...result, current: document === entry.document && note.url === entry.content.webContents.getURL() };
 }
-module.exports = { selectAnnotation, publicAnnotation };
+module.exports = { selectAnnotation, publicAnnotation, withNode };

@@ -62,6 +62,8 @@ async function annotationAction(action, args) {
     const message = error.message;
     annotationElement('annotation-error').textContent = /protected|reserved for the user/.test(message)
       ? 'パスワード入力中や、保護された表示への注釈はできません。'
+      : /Invalid adjustment/.test(message) ? '調整する値の形式を確認してください。'
+        : /Text adjustment/.test(message) ? 'この要素の文字は直接編集できません。'
       : /changed|no longer available|again/.test(message) ? 'ページが変わりました。場所を選び直してください。'
         : /visible element|Invalid annotation/.test(message) ? '画面内の要素か範囲を選択してください。'
           : '注釈の操作に失敗しました。もう一度お試しください。';
@@ -108,19 +110,21 @@ annotationElement('annotation-menu').onpointerenter = () => showAnnotationMenu(t
 annotationElement('annotation-menu').onpointerleave = hideAnnotationMenuSoon;
 annotationElement('annotation-menu').onfocusin = () => showAnnotationMenu(true);
 annotationElement('annotation-menu').onfocusout = hideAnnotationMenuSoon;
-annotationElement('annotation-cancel').onclick = () => annotationAction('annotation-cancel');
+annotationElement('annotation-cancel').onclick = () => { discardAdjustmentInputs(); void annotationAction('annotation-cancel'); };
 annotationElement('annotation-delete').onclick = () => annotationAction('annotation-delete', { id: annotationState?.draft?.editId });
 annotationElement('annotation-form').onsubmit = async event => {
   event.preventDefault();
   if (annotationBusy) return;
   annotationBusy = true;
   event.submitter.disabled = true;
-  try { await annotationAction('annotation-save', { comment: annotationElement('annotation-comment').value }); }
+  try { if (await flushAdjustments()) await annotationAction('annotation-save', { comment: annotationElement('annotation-comment').value }); }
   finally { event.submitter.disabled = false; annotationBusy = false; }
 };
 const layer = annotationElement('annotation-layer');
-window.doze.saveAnnotation(() => {
+window.doze.adjustError(message => { annotationElement('annotation-error').textContent = /protected|reserved for the user/.test(message) ? '保護された表示への調整はできません。' : '調整を元に戻せませんでした。ページの状態を確認してください。'; });
+window.doze.saveAnnotation(async () => {
   if (annotationState?.active && annotationState.draft && !annotationBusy) {
+    if (!await flushAdjustments()) return;
     const form = annotationElement('annotation-form');
     form.requestSubmit(form.querySelector('button[type="submit"]'));
   }
@@ -130,7 +134,7 @@ layer.addEventListener('wheel', event => { if (!event.target.closest('#annotatio
 layer.onpointerdown = event => {
   if (event.button !== 0 || annotationBusy || event.target.closest('#annotation-panel, #annotation-menu, .annotation-pin')) return;
   showAnnotationMenu(false);
-  if (annotationState?.draft && annotationElement('annotation-comment').value.trim()) { annotationElement('annotation-comment').focus(); return; }
+  if (annotationState?.draft && (annotationElement('annotation-comment').value.trim() || hasDraftAdjustments(annotationState.draft) || adjustmentDirty.size)) { annotationElement('annotation-comment').focus(); return; }
   clearAnnotationHover();
   annotationStart = contentPoint(event);
   layer.setPointerCapture(event.pointerId);
@@ -159,6 +163,7 @@ layer.onpointerup = async event => {
 document.addEventListener('keydown', event => {
   if (!annotationState?.active || event.isComposing || event.key !== 'Escape') return;
   event.preventDefault();
+  if (annotationState.draft) discardAdjustmentInputs();
   void annotationAction(annotationState.draft ? 'annotation-cancel' : 'annotation-toggle');
 });
 window.doze.subscribe(next => {
@@ -171,6 +176,7 @@ window.doze.subscribe(next => {
   annotationElement('annotation-status').hidden = !active;
   annotationElement('annotate').title = active ? '注釈を終了（ホバーで一覧）' : '注釈を付ける';
   annotationElement('annotation-panel').hidden = !annotation?.draft;
+  renderAdjust(annotation?.draft);
   annotationElement('annotation-empty').hidden = !!annotation?.notes.length;
   annotationElement('annotation-form').querySelector('button[type="submit"]').title = next.mac ? '⌘Enterで保存' : 'Ctrl+Enterで保存';
   layer.hidden = !active;
@@ -199,13 +205,13 @@ window.doze.subscribe(next => {
     remove.onclick = () => annotationAction('annotation-delete', { id: note.id });
     const edit = () => {
       clearAnnotationHover();
-      if (annotationState?.draft && annotationElement('annotation-comment').value.trim()) { annotationElement('annotation-comment').focus(); return; }
+      if (annotationState?.draft && (annotationElement('annotation-comment').value.trim() || hasDraftAdjustments(annotationState.draft) || adjustmentDirty.size)) { annotationElement('annotation-comment').focus(); return; }
       void annotationAction('annotation-edit', { id: note.id });
     };
     if (note.current) {
-      const comment = document.createElement('button'); comment.type = 'button'; comment.className = 'annotation-note'; comment.textContent = note.comment; comment.title = '注釈を編集'; comment.onclick = edit;
+      const comment = document.createElement('button'); comment.type = 'button'; comment.className = 'annotation-note'; comment.textContent = annotationSummary(note); comment.title = '注釈を編集'; comment.onclick = edit;
       item.append(remove, comment);
-    } else item.append(remove, document.createTextNode(note.comment));
+    } else item.append(remove, document.createTextNode(annotationSummary(note)));
     if (!note.current) { const previous = document.createElement('small'); previous.textContent = '（以前のページ）'; item.append(previous); }
     list.append(item);
     if (!note.current || note.viewport.width !== annotation.viewport?.width || note.viewport.height !== annotation.viewport?.height) continue;
@@ -215,7 +221,7 @@ window.doze.subscribe(next => {
     pin.onpointerenter = () => {
       if (annotationState?.draft) return;
       clearAnnotationHover();
-      const preview = annotationElement('annotation-preview'); preview.textContent = note.comment; preview.hidden = false;
+      const preview = annotationElement('annotation-preview'); preview.textContent = annotationSummary(note); preview.hidden = false;
       const x = parseFloat(pin.style.left) + 32;
       const y = parseFloat(pin.style.top);
       Object.assign(preview.style, { left: Math.max(12, Math.min(layer.clientWidth - preview.offsetWidth - 12, x)) + 'px', top: Math.max(12, Math.min(layer.clientHeight - preview.offsetHeight - 12, y)) + 'px' });

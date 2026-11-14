@@ -10,7 +10,7 @@ const definitions = [
   ['show_page', 'Show your existing page in the doze browser without restarting it. Requires explicit joint viewing. Closing the view keeps the page open.', { page_id }],
   ['list_pages', 'List your own pages without starting Chromium.', {}, true],
   ['inspect_page', 'Read the accessibility tree as DevTools text. Use fresh uid references for click and fill.', { page_id }, true],
-  ['get_annotations', 'Read user-saved element and area comments for your page. Comments include the URL and whether they belong to the current document. No screenshot or input values are collected.', { page_id }, true],
+  ['get_annotations', 'Read user-saved element and area comments, including Adjust style/text changes with before and after values. Comments include the URL and whether they belong to the current document. No screenshot or form input values are collected.', { page_id }, true],
   ['navigate_page', 'Navigate your page and wait for DOM readiness.', { page_id, url }],
   ['click', 'Click an element using its uid from inspect_page. May submit or change external state.', { page_id, element }],
   ['fill', 'Replace an editable value using its uid from inspect_page.', { page_id, element, value: z.string() }],
