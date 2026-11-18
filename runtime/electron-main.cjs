@@ -158,7 +158,7 @@ function installMenuShortcuts() {
     ...(mac ? [{ role: 'appMenu' }] : []),
     { label: 'ファイル', submenu: [
       command('URLを開く…', 'CommandOrControl+L', { action: 'url' }),
-      command('注釈モードを切り替え', 'CommandOrControl+Alt+A', { action: 'toggle-annotation' }, { id: 'toggle-annotation', enabled: false }),
+      command('注釈モードを切り替え', mac ? 'Command+Control+A' : 'CommandOrControl+Alt+A', { action: 'toggle-annotation' }, { id: 'toggle-annotation', enabled: false }),
       command('注釈を保存', 'CommandOrControl+Enter', { action: 'save-annotation' }, { id: 'save-annotation', enabled: false }),
       { type: 'separator' },
       command('タブを隠す', 'CommandOrControl+W', { action: 'hide-tab' }),

@@ -303,7 +303,11 @@ test('Electron annotations: element and area comments, ownership, navigation and
   await manager.call(caller, 'show_page', first);
   const ui = await record.engine.page({ targetId: record.entry.uiTargetId });
   ui.setDefaultTimeout(5000);
-  await ui.evaluate(target => console.log('test-native-menu:' + JSON.stringify({ target, accelerator: 'CommandOrControl+Alt+A' })), record.entry.uiTargetId);
+  const annotationShortcut = process.platform === 'darwin' ? 'Command+Control+A' : 'CommandOrControl+Alt+A';
+  const toggleAnnotations = () => ui.evaluate((target, accelerator) => {
+    console.log('test-native-menu:' + JSON.stringify({ target, accelerator }));
+  }, record.entry.uiTargetId, annotationShortcut);
+  await toggleAnnotations();
   await ui.waitForFunction(() => !document.getElementById('annotation-layer').hidden);
   assert.equal(await ui.$eval('#annotation-panel', element => element.hidden), true);
   assert.equal(await ui.$eval('#annotation-status', element => element.hidden), false);
@@ -384,7 +388,7 @@ test('Electron annotations: element and area comments, ownership, navigation and
   assert.equal(areas[1].kind, 'area'); assert.equal(areas[1].rect.width, 150); assert.equal(areas[1].rect.height, 80);
   assert.equal(areas[1].rect.y + areas[1].viewport.scrollY, 120);
   await ui.screenshot({ path: join(tmpdir(), 'doze-annotations-ui.png') });
-  await ui.evaluate(target => console.log('test-native-menu:' + JSON.stringify({ target, accelerator: 'CommandOrControl+Alt+A' })), record.entry.uiTargetId);
+  await toggleAnnotations();
   await ui.waitForFunction(() => document.getElementById('annotation-layer').hidden);
   assert.match(await manager.call(caller, 'inspect_page', first), /textbox "Name"/);
   await manager.call(caller, 'navigate_page', { ...first, url: url + '/next' });

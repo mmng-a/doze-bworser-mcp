@@ -248,7 +248,7 @@ window.doze.subscribe(next => {
   annotationElement('annotate').disabled = !annotation?.available;
   annotationElement('annotate').setAttribute('aria-pressed', String(active));
   annotationElement('annotation-status').hidden = !active;
-  const shortcut = next.mac ? '⌥⌘A' : 'Ctrl+Alt+A';
+  const shortcut = next.mac ? '⌃⌘A' : 'Ctrl+Alt+A';
   annotationElement('annotate').title = active ? `注釈を終了（${shortcut}、ホバーで一覧）` : `注釈を付ける（${shortcut}）`;
   annotationElement('annotation-panel').hidden = !annotation?.draft;
   renderAdjust(annotation?.draft);
