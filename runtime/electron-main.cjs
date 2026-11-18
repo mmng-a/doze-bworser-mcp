@@ -41,7 +41,7 @@ function state(view) {
     onePassword: entry?.partition === 'persist:project' ? { ...onePassword.state, tabId: wc.id } : null,
     annotation: { active: !!view.annotating, available: !!entry && !entry.userOnly && !entry.dialog,
       draft: view.annotationDraft ? { ...publicAnnotation(view.annotationDraft, entry), editId: view.annotationDraft.editId, adjust: view.annotationDraft.adjust } : null,
-      zoom: wc?.getZoomFactor() || 1, viewport: view.annotationViewport,
+      zoom: wc?.getZoomFactor() || 1, viewport: view.annotationViewport, token: view.annotationToken,
       notes: view.annotating && entry ? entry.annotations.map(note => publicAnnotation(note, entry)) : [] },
     pages: view.tabs.map(id => entries.get(id)).filter(Boolean).map(pageState) };
 }
@@ -73,6 +73,9 @@ function select(entry, showWindow = false) {
 }
 function stopAnnotations(view) {
   const entry = entries.get(view.active);
+  if (view.annotating && entry && !entry.content.webContents.isDestroyed()) {
+    entry.content.webContents.send('doze-watch-annotation-scroll', false);
+  }
   void entry?.adjustments?.cancel().catch(error => {
     if (!view.ui.webContents.isDestroyed()) view.ui.webContents.send('doze-adjust-error', error.message);
   });
@@ -106,6 +109,11 @@ function runShortcut(view, { action, value }) {
     if (view.annotating && view.annotationDraft) view.ui.webContents.send('doze-save-annotation');
     return;
   }
+  if (action === 'toggle-annotation') {
+    const entry = entries.get(view.active);
+    if (entry && !entry.userOnly && !entry.dialog) view.ui.webContents.send('doze-toggle-annotation');
+    return;
+  }
   if (view.annotating) { stopAnnotations(view); refresh(); }
   const entry = entries.get(view.active);
   const wc = entry?.content.webContents;
@@ -132,7 +140,9 @@ function refreshStopMenu() {
   const view = [...views.values()].find(view => view.window === BaseWindow.getFocusedWindow());
   const entry = entries.get(view?.active);
   const stop = browserMenu?.getMenuItemById('stop');
+  const toggleAnnotation = browserMenu?.getMenuItemById('toggle-annotation');
   const saveAnnotation = browserMenu?.getMenuItemById('save-annotation');
+  if (toggleAnnotation) toggleAnnotation.enabled = !!entry && !entry.userOnly && !entry.dialog;
   if (saveAnnotation) saveAnnotation.enabled = !!view?.annotating && !!view.annotationDraft;
   const contents = entry?.content.webContents;
   if (stop) stop.enabled = !!contents && !contents.isDestroyed() && !entry.dialog && contents.isFocused();
@@ -148,6 +158,7 @@ function installMenuShortcuts() {
     ...(mac ? [{ role: 'appMenu' }] : []),
     { label: 'ファイル', submenu: [
       command('URLを開く…', 'CommandOrControl+L', { action: 'url' }),
+      command('注釈モードを切り替え', 'CommandOrControl+Alt+A', { action: 'toggle-annotation' }, { id: 'toggle-annotation', enabled: false }),
       command('注釈を保存', 'CommandOrControl+Enter', { action: 'save-annotation' }, { id: 'save-annotation', enabled: false }),
       { type: 'separator' },
       command('タブを隠す', 'CommandOrControl+W', { action: 'hide-tab' }),
@@ -342,6 +353,14 @@ function validateURL(value) {
   if (value !== 'about:blank' && !['http:', 'https:'].includes(url.protocol)) throw new Error('Use HTTP(S) or about:blank');
   return url.href;
 }
+ipcMain.on('doze-annotation-scroll', (event, scrollX, scrollY) => {
+  const entry = [...entries.values()].find(item => item.content.webContents === event.sender);
+  if (!entry || event.senderFrame !== event.sender.mainFrame || !isShown(entry) || !entry.view.annotating || entry.dialog) return;
+  const viewport = entry.view.annotationViewport;
+  if (!viewport || (viewport.scrollX === scrollX && viewport.scrollY === scrollY)) return;
+  entry.view.annotationViewport = { ...viewport, scrollX, scrollY };
+  refresh();
+});
 ipcMain.handle('doze-ui', async (event, action, args = {}) => {
   const view = [...views.values()].find(v => v.ui.webContents === event.sender && event.senderFrame === event.sender.mainFrame);
   if (!view) throw new Error('Invalid browser UI sender');
@@ -356,14 +375,29 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
       const token = view.annotationToken;
       view.annotationDraft = null;
       view.annotationViewport = null;
+      let viewport;
       try {
         entry.privacy ||= new PagePrivacy(wc);
         await entry.privacy.start();
         const { cssLayoutViewport } = await entry.privacy.send('Page.getLayoutMetrics');
-        view.annotationViewport = { width: cssLayoutViewport.clientWidth, height: cssLayoutViewport.clientHeight, scrollX: cssLayoutViewport.pageX, scrollY: cssLayoutViewport.pageY };
-      } catch (error) { refresh(); throw error; }
+        viewport = { width: cssLayoutViewport.clientWidth, height: cssLayoutViewport.clientHeight, scrollX: cssLayoutViewport.pageX, scrollY: cssLayoutViewport.pageY };
+      } catch (error) {
+        if (view.annotationToken === token) { stopAnnotations(view); refresh(); }
+        throw error;
+      }
       if (view.annotationToken !== token || view.active !== entry.id || !isShown(entry)) break;
+      view.annotationViewport = viewport;
+      wc.send('doze-watch-annotation-scroll', true);
       view.ui.webContents.focus(); refresh(); break;
+    }
+    case 'annotation-page-pointer': {
+      if (!entry || !isShown(entry) || !view.annotating || entry.userOnly || entry.dialog || args.token !== view.annotationToken) break;
+      const zoom = wc.getZoomFactor();
+      const { type, x, y, button, buttons, clickCount, modifiers, deltaX, deltaY } = args;
+      await entry.privacy.send('Input.dispatchMouseEvent', {
+        type, x: x / zoom, y: y / zoom, button, buttons, clickCount, modifiers, deltaX, deltaY,
+      });
+      break;
     }
     case 'annotation-hover': {
       if (!entry || !view.annotating || view.annotationDraft || entry.userOnly || !isShown(entry)) throw privacyError();
@@ -378,13 +412,7 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
       if (!note || !publicAnnotation(note, entry).current) throw new Error('The page changed. Select the target again.');
       const token = view.annotationToken;
       await entry.adjustments?.cancel();
-      let selection = note;
-      if (note.kind === 'area') {
-        const { cssLayoutViewport } = await entry.privacy.send('Page.getLayoutMetrics');
-        const rect = { ...note.rect, x: note.rect.x + note.viewport.scrollX - cssLayoutViewport.pageX, y: note.rect.y + note.viewport.scrollY - cssLayoutViewport.pageY };
-        selection = { kind: 'area', ...Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * wc.getZoomFactor()])) };
-      }
-      const selected = await selectAnnotation(entry, selection, hasAdjustments(note.adjustments));
+      const selected = await selectAnnotation(entry, note, hasAdjustments(note.adjustments));
       if (view.annotationToken !== token || view.active !== entry.id || !entry.annotations.some(item => item.id === note.id)) throw new Error('The page changed.');
       view.annotationDraft = { ...selected, comment: note.comment, editId: note.id,
         adjustments: note.adjustments, adjustmentKey: note.adjustmentKey, adjustmentOrder: note.adjustmentOrder };
@@ -442,7 +470,10 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
       if (!entry || !view.annotating || !draft || draft.document !== entry.document || draft.url !== wc.getURL()) throw new Error('Select the annotation target again.');
       if (typeof args.comment !== 'string' || (!args.comment.trim() && !hasAdjustments(draft.adjustments)) || args.comment.length > 4000) throw new Error('Enter an annotation comment.');
       const token = view.annotationToken;
-      const selected = await selectAnnotation(entry, draft.kind === 'element' ? draft : { kind: 'area', ...Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * draft.zoom])) }, hasAdjustments(draft.adjustments));
+      const selected = await selectAnnotation(entry, draft, hasAdjustments(draft.adjustments));
+      if (draft.kind === 'area' && (selected.rect.width + 0.01 < draft.rect.width || selected.rect.height + 0.01 < draft.rect.height)) {
+        throw new Error('Select a visible element or area');
+      }
       const adjustment = draft.adjust ? await entry.adjustments.commit(draft) : draft.adjustments ? { adjustments: draft.adjustments, adjustmentKey: draft.adjustmentKey, adjustmentOrder: draft.adjustmentOrder } : {};
       if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed. Select the target again.');
       const note = { ...selected, comment: args.comment.trim(), ...adjustment };

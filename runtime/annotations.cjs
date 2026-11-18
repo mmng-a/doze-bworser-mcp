@@ -45,7 +45,14 @@ async function selectAnnotation(entry, selection, allowEmpty = false) {
   const zoom = wc.getZoomFactor();
   const { cssLayoutViewport: viewport } = await privacy.send('Page.getLayoutMetrics');
   const limit = { width: viewport.clientWidth, height: viewport.clientHeight };
-  let rect = selection.backendNodeId ? null : { x: selection.x / zoom, y: selection.y / zoom, width: selection.width / zoom, height: selection.height / zoom };
+  let rect;
+  if (selection.kind === 'area' && selection.viewport) {
+    const x = selection.rect.x + (selection.viewport.scrollX - viewport.pageX);
+    const y = selection.rect.y + (selection.viewport.scrollY - viewport.pageY);
+    rect = { ...selection.rect, x, y };
+  } else if (!selection.backendNodeId) {
+    rect = { x: selection.x / zoom, y: selection.y / zoom, width: selection.width / zoom, height: selection.height / zoom };
+  }
   if (rect && (!Object.values(rect).every(Number.isFinite) || rect.x < 0 || rect.y < 0 || rect.x >= limit.width || rect.y >= limit.height || rect.width < 0 || rect.height < 0)) throw new Error('Invalid annotation selection');
   let target;
   let frameId = selection.frameId;

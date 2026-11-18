@@ -1,7 +1,10 @@
 const annotationElement = id => document.getElementById(id);
+const pagePointerButtons = ['left', 'middle', 'right', 'back', 'forward'];
 let annotationState;
+let annotationMac;
 let annotationDraft;
 let annotationStart;
+let pagePointer;
 let annotationBusy = false;
 let hoverTimer;
 let hoverPoint;
@@ -56,7 +59,7 @@ function queueAnnotationHover(point) {
 
 async function annotationAction(action, args) {
   try {
-    annotationElement('annotation-error').textContent = '';
+    if (action !== 'annotation-page-pointer') annotationElement('annotation-error').textContent = '';
     await window.doze.act(action, args);
     return true;
   } catch (error) {
@@ -73,14 +76,43 @@ async function annotationAction(action, args) {
 }
 function selectionBox(rect) {
   const box = annotationElement('annotation-selection');
-  box.hidden = !rect;
-  if (rect) Object.assign(box.style, { left: rect.x + 'px', top: rect.y + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+  if (!rect) { box.hidden = true; return; }
+  const x = Math.max(0, rect.x);
+  const y = Math.max(0, rect.y);
+  const width = Math.min(layer.clientWidth, rect.x + rect.width) - x;
+  const height = Math.min(layer.clientHeight, rect.y + rect.height) - y;
+  box.hidden = width < 0 || height < 0;
+  if (!box.hidden) Object.assign(box.style, { left: x + 'px', top: y + 'px', width: width + 'px', height: height + 'px' });
 }
 function areaBetween(a, b) {
   return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(a.x - b.x), height: Math.abs(a.y - b.y) };
 }
 function contentPoint(event) {
-  return { x: Math.max(0, Math.min(innerWidth - 1, event.clientX)), y: Math.max(0, Math.min(innerHeight - 49, event.clientY - 48)) };
+  const { x, y } = pagePoint(event);
+  return { x: Math.max(0, Math.min(innerWidth - 1, x)), y: Math.max(0, Math.min(innerHeight - 49, y)) };
+}
+function pagePoint(event) {
+  return { x: event.clientX, y: event.clientY - 48 };
+}
+function overAnnotationControls(event) {
+  return event.target.closest('#annotation-panel, #annotation-menu');
+}
+function wantsPagePointer(event) {
+  return (annotationMac ? event.metaKey : event.ctrlKey) && !overAnnotationControls(event);
+}
+function forwardPagePointer(type, event, extra = {}) {
+  // The mode modifier belongs to the annotation UI, not the page.
+  const modifiers = (event.altKey ? 1 : 0) | (annotationMac && event.ctrlKey ? 2 : 0) |
+    (!annotationMac && event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
+  void annotationAction('annotation-page-pointer', {
+    type, ...pagePoint(event), modifiers, buttons: event.buttons, ...extra, token: annotationState.token,
+  });
+}
+function viewportRect(rect, viewport) {
+  const current = annotationState.viewport || viewport;
+  return Object.fromEntries(Object.entries({
+    ...rect, x: rect.x + viewport.scrollX - current.scrollX, y: rect.y + viewport.scrollY - current.scrollY,
+  }).map(([key, value]) => [key, value * annotationState.zoom]));
 }
 function positionAnnotationPanel() {
   const panel = annotationElement('annotation-panel');
@@ -109,6 +141,7 @@ function positionAnnotationPanel() {
   Object.assign(panel.style, { right: 'auto', left: annotationPanelAnchor.x + 'px', top: annotationPanelAnchor.y + 'px' });
 }
 annotationElement('annotate').onclick = () => annotationAction('annotation-toggle');
+window.doze.toggleAnnotation(() => annotationAction('annotation-toggle'));
 annotationElement('annotate').onpointerenter = () => showAnnotationMenu(true);
 annotationElement('annotate').onpointerleave = hideAnnotationMenuSoon;
 annotationElement('annotate').onfocus = () => showAnnotationMenu(true);
@@ -137,8 +170,35 @@ window.doze.saveAnnotation(async () => {
   }
 });
 new ResizeObserver(positionAnnotationPanel).observe(annotationElement('annotation-panel'));
-layer.addEventListener('wheel', event => { if (!event.target.closest('#annotation-panel, #annotation-menu')) event.preventDefault(); }, { passive: false });
+layer.addEventListener('wheel', event => {
+  if (overAnnotationControls(event)) return;
+  event.preventDefault();
+  if (annotationStart || !wantsPagePointer(event)) return;
+  clearAnnotationHover();
+  forwardPagePointer('mouseWheel', event, { deltaX: event.deltaX, deltaY: event.deltaY });
+}, { passive: false });
+layer.onmousedown = event => {
+  if (pagePointer === undefined) return;
+  event.preventDefault();
+  forwardPagePointer('mousePressed', event, { button: pagePointerButtons[event.button], clickCount: event.detail });
+};
+layer.onmouseup = event => {
+  if (pagePointer === undefined) return;
+  forwardPagePointer('mouseReleased', event, { button: pagePointerButtons[event.button], clickCount: event.detail });
+  if (!event.buttons) pagePointer = undefined;
+};
+layer.oncontextmenu = event => { if (wantsPagePointer(event)) event.preventDefault(); };
 layer.onpointerdown = event => {
+  if (event.pointerType === 'mouse' && !annotationStart && wantsPagePointer(event)) {
+    pagePointer = event.pointerId;
+    layer.setPointerCapture(event.pointerId);
+    layer.classList.add('page-pointer');
+    showAnnotationMenu(false);
+    clearAnnotationHover();
+    annotationElement('annotation-preview').hidden = true;
+    return;
+  }
+  layer.classList.remove('page-pointer');
   if (event.button !== 0 || annotationBusy || event.target.closest('#annotation-panel, #annotation-menu, .annotation-pin')) return;
   showAnnotationMenu(false);
   if (annotationState?.draft && (annotationElement('annotation-comment').value.trim() || hasDraftAdjustments(annotationState.draft) || adjustmentDirty.size)) { annotationElement('annotation-comment').focus(); return; }
@@ -148,12 +208,18 @@ layer.onpointerdown = event => {
   selectionBox(null);
 };
 layer.onpointermove = event => {
-  if (annotationStart) selectionBox(areaBetween(annotationStart, contentPoint(event)));
+  const passThrough = pagePointer === event.pointerId ||
+    (event.pointerType === 'mouse' && !event.buttons && !annotationStart && wantsPagePointer(event));
+  layer.classList.toggle('page-pointer', passThrough);
+  if (passThrough) {
+    clearAnnotationHover();
+    forwardPagePointer('mouseMoved', event);
+  } else if (annotationStart) selectionBox(areaBetween(annotationStart, contentPoint(event)));
   else if (!event.target.closest('#annotation-panel, #annotation-menu, .annotation-pin') && !annotationState?.draft) queueAnnotationHover(contentPoint(event));
   else clearAnnotationHover();
 };
-layer.onpointerleave = clearAnnotationHover;
-layer.onpointercancel = () => { annotationStart = null; selectionBox(null); };
+layer.onpointerleave = () => { layer.classList.remove('page-pointer'); clearAnnotationHover(); };
+layer.onpointercancel = () => { pagePointer = undefined; annotationStart = null; selectionBox(null); };
 layer.onpointerup = async event => {
   if (!annotationStart) return;
   layer.releasePointerCapture(event.pointerId);
@@ -176,24 +242,29 @@ document.addEventListener('keydown', event => {
 window.doze.subscribe(next => {
   const annotation = next.annotation;
   annotationState = annotation;
+  annotationMac = next.mac;
   const active = !!annotation?.active;
   document.documentElement.classList.toggle('annotating', active);
   annotationElement('annotate').disabled = !annotation?.available;
   annotationElement('annotate').setAttribute('aria-pressed', String(active));
   annotationElement('annotation-status').hidden = !active;
-  annotationElement('annotate').title = active ? '注釈を終了（ホバーで一覧）' : '注釈を付ける';
+  const shortcut = next.mac ? '⌥⌘A' : 'Ctrl+Alt+A';
+  annotationElement('annotate').title = active ? `注釈を終了（${shortcut}、ホバーで一覧）` : `注釈を付ける（${shortcut}）`;
   annotationElement('annotation-panel').hidden = !annotation?.draft;
   renderAdjust(annotation?.draft);
   annotationElement('annotation-empty').hidden = !!annotation?.notes.length;
   annotationElement('annotation-form').querySelector('button[type="submit"]').title = next.mac ? '⌘Enterで保存' : 'Ctrl+Enterで保存';
   layer.hidden = !active;
   annotationElement('annotation-preview').hidden = true;
-  if (!active) { showAnnotationMenu(false); annotationDraft = null; annotationStart = null; clearAnnotationHover(); selectionBox(null); return; }
+  if (!active) {
+    showAnnotationMenu(false); annotationDraft = null; annotationStart = null; pagePointer = undefined;
+    layer.classList.remove('page-pointer'); clearAnnotationHover(); selectionBox(null); return;
+  }
   const draft = annotation.draft;
   if (draft) clearAnnotationHover();
   annotationElement('annotation-form').hidden = !draft;
   if (draft && annotationDraft !== draft.id) showAnnotationMenu(false);
-  selectionBox(draft ? Object.fromEntries(Object.entries(draft.rect).map(([key, value]) => [key, value * annotation.zoom])) : null);
+  if (!annotationStart) selectionBox(draft ? viewportRect(draft.rect, draft.viewport) : null);
   if (draft && annotationDraft !== draft.id) {
     annotationElement('annotation-comment').value = draft.comment || '';
     annotationElement('annotation-comment').focus({ preventScroll: true });
@@ -223,10 +294,11 @@ window.doze.subscribe(next => {
     list.append(item);
     if (!note.current || note.viewport.width !== annotation.viewport?.width || note.viewport.height !== annotation.viewport?.height) continue;
     const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'annotation-pin'; pin.textContent = String(index + 1); pin.setAttribute('aria-label', `${index + 1}番の注釈を編集`); pin.onclick = edit;
-    pin.style.left = ((note.rect.x + note.viewport.scrollX - annotation.viewport.scrollX) * annotation.zoom) + 'px';
-    pin.style.top = ((note.rect.y + note.viewport.scrollY - annotation.viewport.scrollY) * annotation.zoom) + 'px';
-    pin.onpointerenter = () => {
-      if (annotationState?.draft) return;
+    const { x, y } = viewportRect(note.rect, note.viewport);
+    pin.style.left = x + 'px';
+    pin.style.top = y + 'px';
+    pin.onpointerenter = event => {
+      if (annotationState?.draft || wantsPagePointer(event)) return;
       clearAnnotationHover();
       const preview = annotationElement('annotation-preview'); preview.textContent = annotationSummary(note); preview.hidden = false;
       const x = parseFloat(pin.style.left) + 32;
