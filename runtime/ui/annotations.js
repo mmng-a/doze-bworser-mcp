@@ -286,13 +286,14 @@ window.doze.subscribe(next => {
       if (annotationState?.draft && (annotationElement('annotation-comment').value.trim() || hasDraftAdjustments(annotationState.draft) || adjustmentDirty.size)) { annotationElement('annotation-comment').focus(); return; }
       void annotationAction('annotation-edit', { id: note.id });
     };
-    if (note.current) {
+    if (note.current && !note.resolved) {
       const comment = document.createElement('button'); comment.type = 'button'; comment.className = 'annotation-note'; comment.textContent = annotationSummary(note); comment.title = '注釈を編集'; comment.onclick = edit;
       item.append(remove, comment);
     } else item.append(remove, document.createTextNode(annotationSummary(note)));
+    if (note.resolved) { const resolved = document.createElement('small'); resolved.textContent = '（解決済み）'; item.append(resolved); }
     if (!note.current) { const previous = document.createElement('small'); previous.textContent = '（以前のページ）'; item.append(previous); }
     list.append(item);
-    if (!note.current || note.viewport.width !== annotation.viewport?.width || note.viewport.height !== annotation.viewport?.height) continue;
+    if (!note.current || note.resolved || note.viewport.width !== annotation.viewport?.width || note.viewport.height !== annotation.viewport?.height) continue;
     const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'annotation-pin'; pin.textContent = String(index + 1); pin.setAttribute('aria-label', `${index + 1}番の注釈を編集`); pin.onclick = edit;
     const { x, y } = viewportRect(note.rect, note.viewport);
     pin.style.left = x + 'px';

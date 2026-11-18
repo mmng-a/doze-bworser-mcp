@@ -387,6 +387,13 @@ test('Electron annotations: element and area comments, ownership, navigation and
   const areas = await manager.call(caller, 'get_annotations', first);
   assert.equal(areas[1].kind, 'area'); assert.equal(areas[1].rect.width, 150); assert.equal(areas[1].rect.height, 80);
   assert.equal(areas[1].rect.y + areas[1].viewport.scrollY, 120);
+  assert.deepEqual(areas.map(note => note.resolved), [false, false]);
+  assert.equal(await manager.call(caller, 'resolve_annotation', { ...first, annotation_id: areas[0].id }), 'OK');
+  assert.deepEqual(await manager.call(caller, 'get_annotations', first), [{ ...areas[0], resolved: true }, areas[1]]);
+  await ui.waitForFunction(() => document.querySelectorAll('.annotation-pin').length === 1
+    && document.querySelector('#annotation-list li').textContent.includes('解決済み'));
+  assert.equal(await ui.$eval('.annotation-pin', pin => pin.textContent), '2');
+  assert.equal(await ui.$('#annotation-list li:first-child .annotation-note'), null);
   await ui.screenshot({ path: join(tmpdir(), 'doze-annotations-ui.png') });
   await toggleAnnotations();
   await ui.waitForFunction(() => document.getElementById('annotation-layer').hidden);
@@ -401,7 +408,7 @@ test('Electron annotations: element and area comments, ownership, navigation and
   await ui.hover('#annotation-menu');
   await ui.locator('#annotation-list li button').click();
   await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 1);
-  assert.equal((await manager.call(caller, 'get_annotations', first)).length, 1);
+  assert.deepEqual(await manager.call(caller, 'get_annotations', first), [{ ...areas[1], current: false }]);
   await ui.mouse.move(1000, 750); await ui.mouse.down(); await ui.mouse.move(1180, 880); await ui.mouse.up();
   await ui.waitForFunction(() => !document.getElementById('annotation-form').hidden);
   const edge = await ui.$eval('#annotation-panel', element => { const r = element.getBoundingClientRect(); return { x:r.x, y:r.y, right:r.right, bottom:r.bottom, width:innerWidth, height:innerHeight }; });
@@ -556,9 +563,7 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   await select(); await adjust(); await change('font-size', '30'); await font('30px'); await save(2);
   const notes = await manager.call(caller, 'get_annotations', first);
   assert.deepEqual(notes[1].adjustments.styles['font-size'], { before:'24px', after:'30px' });
-  await ui.hover('#annotate'); await ui.waitForFunction(() => !document.getElementById('annotation-menu').hidden);
-  await ui.locator('#annotation-list li button').click();
-  await ui.waitForFunction(() => document.querySelectorAll('#annotation-list li').length === 1);
+  assert.equal(await manager.call(caller, 'resolve_annotation', { ...first, annotation_id: notes[0].id }), 'OK');
   await font('30px');
   assert.equal(await record.page.$eval('#adjust-target', element => element.textContent), 'Original');
   await record.page.evaluate(()=>document.getElementById('adjust-target').style.setProperty('font-size','36px'));
@@ -566,7 +571,8 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   await assert.rejects(manager.call(caller,'resolve_annotation',{...first,annotation_id:'missing'}),/Unknown annotation/);
   assert.equal(await manager.call(caller,'resolve_annotation',{...first,annotation_id:notes[1].id}),'OK');
   await font('36px');
-  assert.deepEqual(await manager.call(caller,'get_annotations',first),[]);
+  assert.equal(await manager.call(caller,'resolve_annotation',{...first,annotation_id:notes[1].id}),'OK');
+  assert.deepEqual(await manager.call(caller,'get_annotations',first), notes.map(note => ({ ...note, resolved: true })));
   assert.match(await manager.call(caller,'inspect_page',first),/Original/);
   assert.equal(await record.page.$eval('#adjust-target', element => element.style.getPropertyPriority('font-size')), '');
   await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression:'1' }), /Arbitrary JavaScript is disabled/);

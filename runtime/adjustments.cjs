@@ -138,7 +138,7 @@ class PageAdjustments {
   async render(node, excluded) {
     if (node.document !== this.entry.document || this.entry.content.webContents.isDestroyed()) { this.nodes.delete(node.key); return; }
     const tx = this.draft?.node === node ? this.draft : null;
-    const layers = this.entry.annotations.filter(note => note.adjustmentKey === node.key && note.id !== excluded && note.id !== tx?.selection.editId)
+    const layers = this.entry.annotations.filter(note => !note.resolved && note.adjustmentKey === node.key && note.id !== excluded && note.id !== tx?.selection.editId)
       .sort((a, b) => a.adjustmentOrder - b.adjustmentOrder).map(note => note.adjustments);
     if (tx) layers.push(tx.changes);
     const styles = Object.assign({}, ...layers.map(layer => Object.fromEntries(Object.entries(layer.styles).map(([key, change]) => [key, change.after]))));

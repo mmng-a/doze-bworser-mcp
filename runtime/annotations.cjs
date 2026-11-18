@@ -88,6 +88,6 @@ async function selectAnnotation(entry, selection, allowEmpty = false) {
 }
 function publicAnnotation(note, entry) {
   const { frameId, backendNodeId, document, zoom, editId, adjustmentKey, adjustmentOrder, adjust, ...result } = note;
-  return { ...result, current: document === entry.document && note.url === entry.content.webContents.getURL() };
+  return { ...result, current: document === entry.document && note.url === entry.content.webContents.getURL(), resolved: !!note.resolved };
 }
 module.exports = { selectAnnotation, publicAnnotation, withNode };

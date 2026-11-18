@@ -86,7 +86,7 @@ function stopAnnotations(view) {
 async function removeAnnotation(entry, id) {
   const note = entry.annotations.find(note => note.id === id);
   if (!note) throw new Error('Unknown annotation; get_annotations again');
-  await entry.adjustments?.remove(note);
+  if (!note.resolved) await entry.adjustments?.remove(note);
   if (entry.view.annotationDraft?.editId === id) entry.view.annotationDraft = null;
   entry.annotations = entry.annotations.filter(note => note.id !== id);
   refresh();
@@ -409,11 +409,11 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
     case 'annotation-edit': {
       if (!entry || !view.annotating || entry.userOnly || !isShown(entry)) throw privacyError();
       const note = entry.annotations.find(note => note.id === args.id);
-      if (!note || !publicAnnotation(note, entry).current) throw new Error('The page changed. Select the target again.');
+      if (!note || note.resolved || !publicAnnotation(note, entry).current) throw new Error('The page changed. Select the target again.');
       const token = view.annotationToken;
       await entry.adjustments?.cancel();
       const selected = await selectAnnotation(entry, note, hasAdjustments(note.adjustments));
-      if (view.annotationToken !== token || view.active !== entry.id || !entry.annotations.some(item => item.id === note.id)) throw new Error('The page changed.');
+      if (view.annotationToken !== token || view.active !== entry.id || !entry.annotations.some(item => item.id === note.id && !item.resolved)) throw new Error('The page changed.');
       view.annotationDraft = { ...selected, comment: note.comment, editId: note.id,
         adjustments: note.adjustments, adjustmentKey: note.adjustmentKey, adjustmentOrder: note.adjustmentOrder };
       refresh(); break;
@@ -476,7 +476,7 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
       }
       const adjustment = draft.adjust ? await entry.adjustments.commit(draft) : draft.adjustments ? { adjustments: draft.adjustments, adjustmentKey: draft.adjustmentKey, adjustmentOrder: draft.adjustmentOrder } : {};
       if (view.annotationToken !== token || view.active !== entry.id) throw new Error('The page changed. Select the target again.');
-      const note = { ...selected, comment: args.comment.trim(), ...adjustment };
+      const note = { ...selected, comment: args.comment.trim(), resolved: false, ...adjustment };
       if (draft.editId) {
         const index = entry.annotations.findIndex(note => note.id === draft.editId);
         if (index === -1) throw new Error('Select the annotation target again.');
@@ -648,8 +648,14 @@ app.whenReady().then(async () => {
           const entry = entries.get(message.page);
           if (!entry || entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
           if (entry.view.active === entry.id && entry.view.annotationDraft) throw new Error('The user is editing an annotation. Wait until the draft is saved or canceled.');
-          await removeAnnotation(entry, message.annotation);
-          if (!entry.annotations.length && entry.view.active === entry.id && !entry.view.annotationDraft) { stopAnnotations(entry.view); refresh(); }
+          const note = entry.annotations.find(note => note.id === message.annotation);
+          if (!note) throw new Error('Unknown annotation; get_annotations again');
+          if (!note.resolved) {
+            await entry.adjustments?.remove(note);
+            note.resolved = true;
+            if (entry.view.active === entry.id && !entry.view.annotationDraft && entry.annotations.every(note => note.resolved)) stopAnnotations(entry.view);
+            refresh();
+          }
           result = 'OK'; break;
         }
         case 'quit':
