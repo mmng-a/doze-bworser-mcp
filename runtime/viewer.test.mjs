@@ -9,6 +9,20 @@ import { BrowserManager } from './browser.mjs';
 import { PendingDialog, PageClosed } from './controller.mjs';
 
 const enabled = !!process.env.DOZE_BROWSER_ELECTRON;
+async function screenshotPixels(page, { image }, positions) {
+  return page.evaluate(async (image, positions) => {
+    const source = new Image();
+    source.src = 'data:image/png;base64,' + image;
+    await source.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = source.naturalWidth;
+    canvas.height = source.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(source, 0, 0);
+    const scale = canvas.width / innerWidth;
+    return positions.map(([x, y]) => Array.from(ctx.getImageData(Math.floor(x * scale), Math.floor(y * scale), 1, 1).data));
+  }, image, positions);
+}
 async function setup(t, nativeMenu = false, extensionFixture = false, privacyFixture = false) {
   const folder = await mkdtemp(join(tmpdir(), 'doze electron 日本語 '));
   const server = createServer((req, res) => {
@@ -18,7 +32,11 @@ async function setup(t, nativeMenu = false, extensionFixture = false, privacyFix
       return;
     }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    if (req.url === '/privacy-frame') { res.end('<label>Frame password<input type="password" autocomplete="current-password"></label>'); return; }
+    if (req.url === '/privacy-frame') {
+      res.end('<label>Frame password<input type="password" autocomplete="current-password" style="position:absolute;left:10px;top:10px;width:160px;height:28px;box-sizing:border-box;border:4px solid red;background:white"></label>'
+        + '<input aria-label="Offscreen password" type="password" style="position:absolute;left:10px;top:200px;width:160px;height:28px">');
+      return;
+    }
     res.end('<title>共同操作</title><link rel="icon" href="/favicon.svg"><input aria-label="Name"><button onclick="window.child=window.open(\'/early\',\'child\',\'width=500,height=400\')">Popup</button><script>window.marker=crypto.randomUUID();</script>' +
       (req.url === '/early' ? '<script>window.reply=prompt("初回の入力","初期値");window.done=true;</script>' : ''));
   });
@@ -128,8 +146,7 @@ test('Electron privacy: safe element operations, password redaction, SPA changes
   const { manager, caller, url } = await setup(t, false, false, true);
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);
-  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression: 'window.unsafeProbe = true' }), /Arbitrary JavaScript is disabled/);
-  assert.equal(await record.page.evaluate(() => window.unsafeProbe), undefined);
+  assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: '1 + 1' }), 2);
   let snapshot = await manager.call(caller, 'inspect_page', first);
   const nameId = snapshot.match(/uid=(\S+) textbox "Name"/)[1];
   await manager.call(caller, 'fill', { ...first, element: nameId, value: 'ordinary input' });
@@ -139,23 +156,49 @@ test('Electron privacy: safe element operations, password redaction, SPA changes
     window.dynamicPassword = document.body.appendChild(document.createElement('input'));
     dynamicPassword.type = 'password'; dynamicPassword.type = 'text'; dynamicPassword.value = 'SYNTHETIC_DYNAMIC_SECRET';
   });
-  await assert.rejects(manager.call(caller, 'inspect_page', first), /protected/);
+  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), /protected password field/);
+  assert.doesNotMatch(await manager.call(caller, 'inspect_page', first), /SYNTHETIC_DYNAMIC_SECRET/);
   await record.page.evaluate(() => dynamicPassword.remove());
   await record.page.evaluate(() => {
     const host = document.body.appendChild(document.createElement('div'));
     window.fixtureShadow = host.attachShadow({ mode: 'closed' });
-    fixtureShadow.innerHTML = '<label>Private credential<input type="password" autocomplete="current-password"></label>';
+    fixtureShadow.innerHTML = '<label>Private credential<input type="password" autocomplete="current-password" style="position:absolute;left:20px;top:80px;width:180px;height:28px;box-sizing:border-box;border:4px solid red;background:white"></label>'
+      + '<button style="position:absolute;left:210px;top:80px;width:80px;height:28px;background:lime">Show password</button><p role="status"></p>';
+    fixtureShadow.querySelector('button').onclick = () => {
+      fixtureShadow.querySelector('input').type = 'text';
+      fixtureShadow.querySelector('p').textContent = 'Validation feedback';
+    };
   });
   snapshot = await manager.call(caller, 'inspect_page', first);
   assert.match(snapshot, /Password \(protected\)/);
-  assert.doesNotMatch(snapshot, /uid=\S+ textbox "Private credential"/);
-  await assert.rejects(manager.call(caller, 'take_screenshot', first), /protected/);
-  await record.page.evaluate(() => fixtureShadow.querySelector('input').value = 'SYNTHETIC_SECRET_DO_NOT_RETURN');
-  await assert.rejects(manager.call(caller, 'inspect_page', first), /protected/);
-  await record.page.evaluate(() => fixtureShadow.querySelector('input').type = 'text');
-  await assert.rejects(manager.call(caller, 'inspect_page', first), /protected/);
-  await assert.rejects(manager.call(caller, 'fill', { ...first, element: nameId, value: 'blocked' }), /protected/);
+  assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), 1);
+  const passwordId = snapshot.match(/uid=(\S+) textbox "Password \(protected\)"/)[1];
+  await manager.call(caller, 'fill', { ...first, element: passwordId, value: 'SYNTHETIC_SECRET_DO_NOT_RETURN' });
+  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression: 'window.blockedProbe = true' }), /protected password field/);
+  assert.equal(await record.page.evaluate(() => window.blockedProbe), undefined);
+  snapshot = await manager.call(caller, 'inspect_page', first);
+  assert.match(snapshot, /passwordMode="masked"/);
+  assert.doesNotMatch(snapshot, /SYNTHETIC_SECRET/);
+  const toggleId = snapshot.match(/uid=(\S+) button "Show password"/)[1];
+  await manager.call(caller, 'click', { ...first, element: toggleId });
+  snapshot = await manager.call(caller, 'inspect_page', first);
+  assert.match(snapshot, /passwordMode="plain-text"/);
+  assert.match(snapshot, /Validation feedback/);
+  assert.doesNotMatch(snapshot, /SYNTHETIC_SECRET/);
+  const pixels = await screenshotPixels(record.page, await manager.call(caller, 'take_screenshot', first), [[40, 92], [150, 92], [21, 92], [215, 92]]);
+  assert.deepEqual(pixels.slice(0, 2), [[0, 0, 0, 255], [0, 0, 0, 255]]);
+  assert.deepEqual(pixels[2], [255, 0, 0, 255]);
+  const [red, green, blue, alpha] = pixels[3];
+  assert.ok(red < 5 && green > 250 && blue < 5 && alpha === 255, 'the adjacent green button stays visible');
+  await record.page.setViewport({ width: 800, height: 600, deviceScaleFactor: 2 });
+  await record.page.evaluate(() => {
+    document.body.style.minHeight = '1200px';
+    fixtureShadow.querySelector('input').style.top = '1000px';
+  });
+  const full = await manager.call(caller, 'take_screenshot', { ...first, full_page: true });
+  assert.deepEqual(await screenshotPixels(record.page, full, [[40, 1012], [21, 1012]]), [[0, 0, 0, 255], [255, 0, 0, 255]]);
   await record.page.evaluate(() => fixtureShadow.querySelector('input').value = '');
+  assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), 1);
   snapshot = await manager.call(caller, 'inspect_page', first);
   assert.match(snapshot, /Password \(protected\)/);
   assert.doesNotMatch(snapshot, /SYNTHETIC_SECRET/);
@@ -164,10 +207,18 @@ test('Electron privacy: safe element operations, password redaction, SPA changes
   await record.page.evaluate(frameURL => { const frame = document.body.appendChild(document.createElement('iframe')); frame.src = frameURL; }, url.replace('127.0.0.1', 'localhost') + '/privacy-frame');
   await record.page.waitForFunction(() => document.querySelector('iframe')?.contentWindow);
   await waitFor(async () => record.page.frames().some(frame => frame.url().endsWith('/privacy-frame')));
-  await record.page.frames().find(frame => frame.url().endsWith('/privacy-frame')).waitForSelector('input');
+  const childFrame = record.page.frames().find(frame => frame.url().endsWith('/privacy-frame'));
+  await childFrame.waitForSelector('input');
   snapshot = await manager.call(caller, 'inspect_page', first);
   assert.match(snapshot, /Password \(protected\)/);
-  await assert.rejects(manager.call(caller, 'take_screenshot', first), /protected/);
+  await childFrame.$eval('input', input => { input.type = 'text'; input.value = 'SYNTHETIC_FRAME_PASSWORD'; });
+  const { x, y } = await record.page.$eval('iframe', frame => {
+    const rect = frame.getBoundingClientRect();
+    return { x: rect.x + frame.clientLeft, y: rect.y + frame.clientTop };
+  });
+  const framed = await manager.call(caller, 'take_screenshot', first);
+  assert.deepEqual(await screenshotPixels(record.page, framed, [[x + 20, y + 20], [x + 11, y + 20], [x + 20, y + 210]]),
+    [[0, 0, 0, 255], [255, 0, 0, 255], [255, 255, 255, 255]]);
   await record.page.evaluate(() => document.querySelector('iframe').remove());
   assert.ok((await manager.call(caller, 'take_screenshot', first)).image);
   await record.page.evaluate(() => console.log('test-capture-race'));
@@ -216,11 +267,18 @@ test('Electron privacy: enabling after arbitrary execution requires a new browse
   };
   await assert.rejects(manager.call(caller, 'inspect_page', first), /protection was enabled/);
   record.page.accessibility.snapshot = snapshot;
-  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), /Arbitrary JavaScript is disabled/);
+  assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), 1);
   await assert.rejects(manager.call(caller, 'click', { ...first, element: oldPasswordId }), /protected|Unknown element/);
   await manager.call(caller, 'close_page', first);
   const second = await manager.call(caller, 'open_page', { url });
-  await assert.rejects(manager.call(caller, 'evaluate_script', { ...second, expression: '1' }), /Arbitrary JavaScript is disabled/);
+  assert.equal(await manager.call(caller, 'evaluate_script', { ...second, expression: '1' }), 1);
+  assert.match(await manager.call(caller, 'inspect_page', second), /textbox "Name"/);
+  const secondRecord = manager.pages.get(second.page_id);
+  await secondRecord.page.evaluate(() => {
+    const input = document.body.appendChild(document.createElement('input'));
+    input.type = 'password'; input.value = 'SYNTHETIC_PROTECTED';
+  });
+  await assert.rejects(manager.call(caller, 'evaluate_script', { ...second, expression: '1' }), /protected password field/);
   assert.match(await manager.call(caller, 'inspect_page', second), /textbox "Name"/);
 });
 
@@ -575,7 +633,7 @@ test('Electron Adjust: live style/text preview, save, edit/reset rollback and ov
   assert.deepEqual(await manager.call(caller,'get_annotations',first), notes.map(note => ({ ...note, resolved: true })));
   assert.match(await manager.call(caller,'inspect_page',first),/Original/);
   assert.equal(await record.page.$eval('#adjust-target', element => element.style.getPropertyPriority('font-size')), '');
-  await assert.rejects(manager.call(caller, 'evaluate_script', { ...first, expression:'1' }), /Arbitrary JavaScript is disabled/);
+  assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression:'1' }), 1);
   const prompting = record.page.evaluate(() => { window.adjustPromptReply = prompt('Synthetic prompt', 'seed'); });
   await ui.waitForFunction(() => !document.getElementById('modal').hidden);
   await ui.locator('#prompt').fill('reply');

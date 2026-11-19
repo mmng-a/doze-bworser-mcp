@@ -75,7 +75,7 @@ class PagePrivacy {
     })();
     await this.ready;
   }
-  async report() {
+  async report(forCapture = false) {
     if (isUserOnlyURL(this.contents.getURL())) throw privacyError();
     try {
       await this.start();
@@ -87,8 +87,8 @@ class PagePrivacy {
       const liveDocuments = new Set();
       const liveNodes = new Set();
       const redact = [];
+      const captureNodes = [];
       this.sensitiveNodes.clear();
-      let passwords = false;
       let entered = false;
       let privateFrames = false;
       const seen = new Set();
@@ -107,6 +107,7 @@ class PagePrivacy {
           documents.set(frameId, sessionId);
           if (isUserOnlyURL(snapshot.strings[document.documentURL])) { privateFrames = true; continue; }
           const nodes = document.nodes;
+          const painted = forCapture ? new Set(document.layout.nodeIndex) : null;
           liveDocuments.add(`${sessionId}:${nodes.backendNodeId[0]}`);
           const observed = this.observedPasswords.get(`${sessionId}:${nodes.backendNodeId[0]}`);
           const loader = frames.get(frameId)?.loaderId;
@@ -127,9 +128,9 @@ class PagePrivacy {
             const password = snapshot.strings[nodes.nodeName[i]].toUpperCase() === 'INPUT' && (type === 'password' || autocomplete.some(value => ['current-password', 'new-password'].includes(value)) || known.has(backendNodeId) || observed?.has(backendNodeId));
             if (password) {
               known.add(backendNodeId);
-              passwords = true;
               entered ||= !!values.get(i)?.length;
-              redact.push({ loaderId: loader, backendNodeId, kind: 'password' });
+              redact.push({ loaderId: loader, backendNodeId, kind: 'password', masked: type === 'password' });
+              if (painted?.has(i)) captureNodes.push({ frameId, backendNodeId });
             }
             if (isUserOnlyURL(attrs.get('src'))) {
               privateFrames = true;
@@ -152,7 +153,7 @@ class PagePrivacy {
       for (const node of this.nodeDocuments.keys()) if (!liveNodes.has(node)) { this.nodeDocuments.delete(node); this.nodeBackends.delete(node); }
       this.frames = frames;
       this.documentSessions = new Map([...frames.values()].map(frame => [frame.loaderId, documents.get(frame.id)]));
-      return { version: this.version, passwords, entered, privateFrames, redact,
+      return { version: this.version, entered, privateFrames, redact, ...(forCapture && { captureNodes }),
         privateLoaders: [...frames.values()].filter(frame => isUserOnlyURL(frame.url) || isUserOnlyURL(frame.securityOrigin)).map(frame => frame.loaderId) };
     } catch (cause) { throw new Error(privacyError().message, { cause }); }
   }

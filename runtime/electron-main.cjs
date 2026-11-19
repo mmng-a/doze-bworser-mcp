@@ -9,6 +9,7 @@ const { readFile, writeFile } = require('node:fs/promises');
 const { isUserOnlyURL, privacyError, PagePrivacy } = require('./privacy.cjs');
 const { selectAnnotation, publicAnnotation } = require('./annotations.cjs');
 const { PageAdjustments, hasAdjustments } = require('./adjustments.cjs');
+const { captureMasks, maskScreenshot } = require('./screenshot-privacy.cjs');
 const profile = process.env.DOZE_ELECTRON_PROFILE;
 if (!profile) throw new Error('Missing private browser profile');
 app.setPath('userData', profile);
@@ -590,15 +591,22 @@ app.whenReady().then(async () => {
           if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
           if (entry.view.annotating && entry.view.active === entry.id && !['get_annotations','resolve_annotation'].includes(message.operation)) throw new Error('The user is adding annotations. Wait until annotation mode is closed.');
           const enabled = entry.partition === 'persist:project' && onePassword.enabled;
-          if (message.operation === 'evaluate_script') {
-            if (enabled) throw new Error('Arbitrary JavaScript is disabled in sessions with 1Password enabled. Use inspect_page, click and fill.');
-            scriptsUsed = true;
+          const evaluating = message.operation === 'evaluate_script';
+          if (!enabled) {
+            if (evaluating) scriptsUsed = true;
+            result = { enabled: false }; break;
           }
-          if (!enabled) { result = { enabled: false }; break; }
           entry.privacy ||= new PagePrivacy(entry.content.webContents);
           const report = await entry.privacy.report();
-          if (report.entered) throw privacyError();
-          if (message.operation === 'take_screenshot' && (report.passwords || report.privateFrames)) throw privacyError();
+          if (report.entered && evaluating) {
+            throw new Error('Arbitrary JavaScript is disabled while a protected password field contains a value. Use inspect_page or click.');
+          }
+          if (report.entered && message.operation === 'check-script') {
+            throw new Error('A protected password field received a value during JavaScript execution. The script may have run; no result was returned.');
+          }
+          if (report.entered && message.operation === 'resolve_annotation') throw privacyError();
+          if (evaluating) scriptsUsed = true;
+          if (message.operation === 'take_screenshot' && report.privateFrames) throw privacyError();
           if (message.version !== undefined && message.version !== report.version) throw new Error('The page changed during this operation. No content was returned; inspect the page again.');
           result = { enabled: true, ...report }; break;
         }
@@ -619,18 +627,20 @@ app.whenReady().then(async () => {
           const entry = entries.get(message.page);
           if (!entry) throw new Error('Page is closed');
           if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
-          const protectedSession = entry.partition === 'persist:project' && onePassword.enabled;
-          const before = protectedSession ? await (entry.privacy ||= new PagePrivacy(entry.content.webContents)).report() : null;
-          if (before && (before.passwords || before.privateFrames)) throw privacyError();
+          const wc = entry.content.webContents;
+          const privacy = entry.partition === 'persist:project' && onePassword.enabled ? (entry.privacy ||= new PagePrivacy(wc)) : null;
           const bounds = entry.content.getBounds();
           try {
             entry.content.setBounds({ ...bounds, width: message.width, height: message.height });
-            await entry.content.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))');
-            const image = await entry.content.webContents.capturePage();
+            await wc.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))');
+            const before = privacy ? await captureMasks(privacy) : null;
+            let image = await wc.capturePage();
             if (image.isEmpty()) throw new Error('Browser capture returned an empty image');
+            if (entry.userOnly) throw privacyError();
             if (before) {
-              const after = await entry.privacy.report();
-              if (after.passwords || after.privateFrames || after.version !== before.version || entry.userOnly) throw privacyError();
+              const after = await captureMasks(privacy);
+              if (after.version !== before.version || JSON.stringify(after.masks) !== JSON.stringify(before.masks) || entry.userOnly) throw privacyError();
+              image = maskScreenshot(image, before.masks, message.width, message.height);
             }
             result = image.resize({ width: Math.round(message.width * message.scale), height: Math.round(message.height * message.scale) }).toPNG().toString('base64');
           } finally {

@@ -18,8 +18,8 @@ const definitions = [
   ['press_key', 'Press a keyboard key on your page.', { page_id, key: z.enum(['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', 'Delete', 'Space']) }],
   ['scroll_page', 'Scroll your page to absolute coordinates.', { page_id, x: z.number().int().optional(), y: z.number().int() }],
   ['set_viewport', 'Set your page viewport without resizing a user window.', { page_id, width: z.number().int().min(1).max(10000), height: z.number().int().min(1).max(10000) }],
-  ['take_screenshot', 'Return a PNG of your page.', { page_id, full_page: z.boolean().optional() }, true],
-  ['evaluate_script', 'Evaluate a JavaScript expression and await its result. Unavailable in sessions with 1Password enabled; use inspect_page, click and fill instead. May change external state.', { page_id, expression: z.string() }],
+  ['take_screenshot', 'Return a PNG of your page with protected password fields masked.', { page_id, full_page: z.boolean().optional() }, true],
+  ['evaluate_script', 'Evaluate a JavaScript expression and await its result. When 1Password protection is enabled, a filled password field on the target page blocks this call. Use inspect_page or click in that case. May change external state.', { page_id, expression: z.string() }],
   ['handle_dialog', 'Respond to the pending dialog and wait for the interrupted operation. prompt_text supplies a prompt response; otherwise its initial value is used. Do not repeat the interrupted operation.', { page_id, accept: z.boolean(), prompt_text: z.string().optional() }],
   ['close_page', 'Close your page, interrupting any active operation.', { page_id }],
 ];

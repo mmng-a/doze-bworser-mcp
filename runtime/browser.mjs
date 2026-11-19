@@ -209,14 +209,15 @@ export class BrowserManager {
     record.controller.privacy = policy.enabled ? policy : null;
     if (policy.enabled && ['click', 'fill'].includes(name)) {
       const node = record.controller.nodes.get(args.element);
-      if (node && policy.redact.some(blocked => blocked.backendNodeId === node.backendNodeId && blocked.loaderId === node.loaderId)) throw new Error('This element is protected for user input.');
+      const blocked = node && policy.redact.find(item => item.backendNodeId === node.backendNodeId && item.loaderId === node.loaderId);
+      if (blocked && !(name === 'fill' && blocked.kind === 'password')) throw new Error('This element is protected for user input.');
     }
     let result;
     let failed = false;
     let failure;
     try { result = await this.operate(record, name, args); }
     catch (error) { failed = true; failure = error; }
-    const after = await record.engine.request('policy', { page: record.id, operation: name === 'evaluate_script' ? 'check' : name,
+    const after = await record.engine.request('policy', { page: record.id, operation: name === 'evaluate_script' ? 'check-script' : name,
       ...(['inspect_page', 'take_screenshot', 'get_annotations'].includes(name) && policy.enabled ? { version: policy.version } : {}) });
     if (after.enabled && !policy.enabled) {
       record.controller.nodes.clear();
