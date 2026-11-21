@@ -76,8 +76,8 @@ class PagePrivacy {
     await this.ready;
   }
   async report(forCapture = false) {
-    if (isUserOnlyURL(this.contents.getURL())) throw privacyError();
     try {
+      if (isUserOnlyURL(this.contents.getURL())) throw privacyError();
       await this.start();
       const { frameTree } = await this.send('Page.getFrameTree');
       const frames = new Map();
@@ -155,7 +155,13 @@ class PagePrivacy {
       this.documentSessions = new Map([...frames.values()].map(frame => [frame.loaderId, documents.get(frame.id)]));
       return { version: this.version, entered, privateFrames, redact, ...(forCapture && { captureNodes }),
         privateLoaders: [...frames.values()].filter(frame => isUserOnlyURL(frame.url) || isUserOnlyURL(frame.securityOrigin)).map(frame => frame.loaderId) };
-    } catch (cause) { throw new Error(privacyError().message, { cause }); }
+    } catch (cause) {
+      // CDP can close before Electron emits the WebContents destruction event.
+      if (this.contents.isDestroyed() || cause.message === 'target closed while handling command') {
+        throw Object.assign(new Error('Page is closed'), { code: 'PAGE_CLOSED' });
+      }
+      throw new Error(privacyError().message, { cause });
+    }
   }
 }
 module.exports = { isUserOnlyURL, privacyError, PagePrivacy };

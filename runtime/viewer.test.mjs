@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, writeFile, chmod, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, chmod, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { BrowserManager } from './browser.mjs';
 import { PendingDialog, PageClosed } from './controller.mjs';
+import { prepareProfile, workspaceKey } from './profiles.mjs';
 
 const enabled = !!process.env.DOZE_BROWSER_ELECTRON;
 async function screenshotPixels(page, { image }, positions) {
@@ -48,7 +49,9 @@ async function setup(t, nativeMenu = false, extensionFixture = false, privacyFix
     const wrapper = join(folder, 'native-menu.cjs');
     errorLog = join(folder, 'native-menu-error.log');
     await writeFile(wrapper, `process.on('uncaughtException', error => { require('node:fs').appendFileSync(${JSON.stringify(errorLog)}, error.stack); process.exit(1); });
-const { app, BaseWindow, Menu, webContents, nativeTheme, session, dialog } = require('electron');
+const { app, BaseWindow, Menu, webContents, nativeTheme, session } = require('electron');
+const fetchFromNetwork = globalThis.fetch;
+globalThis.fetch = (url, ...options) => new URL(url).hostname === 'clients2.google.com' ? Promise.reject(new Error('Offline extension fixture')) : fetchFromNetwork(url, ...options);
 ${process.platform === 'darwin' && process.env.DOZE_TEST_BACKGROUND !== '0' ? `app.setActivationPolicy('accessory');
 const backgroundWindows = new WeakSet();
 BaseWindow.prototype.show = function () {
@@ -59,8 +62,6 @@ BaseWindow.prototype.show = function () {
   this.setFocusable(false);
   this.showInactive();
 };` : ''}
-${privacyFixture === true ? `require('node:fs').writeFileSync(require('node:path').join(process.env.DOZE_ELECTRON_PROFILE,'one-password-enabled'), '');` : ''}
-${privacyFixture === 'install' ? `dialog.showMessageBox = async (_window, options) => { require('node:fs').writeFileSync(${JSON.stringify(errorLog + '.install')}, options.detail || ''); return { response:0 }; };` : ''}
 ${nativeMenu || extensionFixture || privacyFixture ? `app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (_event, _level, message) => {
     if (message === 'test-capture-race') {
@@ -249,37 +250,37 @@ test('Electron privacy: private frames and documents cannot be read or listed', 
   await assert.rejects(manager.call(caller, 'take_screenshot', first), /reserved for the user/);
 });
 
-test('Electron privacy: enabling after arbitrary execution requires a new browser session and stays enabled', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 30_000 }, async t => {
-  const { manager, caller, url } = await setup(t, false, false, 'install');
+test('Electron: 1Password loads from the project profile and shows its extension action automatically', { skip: !enabled || !process.env.DOZE_TEST_VIEWER || process.platform === 'win32', timeout: 30_000 }, async t => {
+  const { manager, caller, url } = await setup(t);
+  const profile = await prepareProfile(join(manager.profilesDirectory, 'electron'), await workspaceKey(caller.cwd));
+  const extension = 'aeblfdkhhhdcdjpifhhbdiojplfjncoa';
+  const folder = join(profile, 'Extensions', extension, '1.0_0');
+  await mkdir(folder, { recursive: true });
+  await writeFile(join(folder, 'manifest.json'), JSON.stringify({
+    manifest_version: 3, name: 'Synthetic extension action', version: '1.0',
+    // The public extension key makes Chromium assign the 1Password extension ID to this fixture.
+    key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnHpaUll4uWujpAdbIXOQY2WE6hk8PllsYsnoUaj5qHXwv4IB6A9pONqGaTL2KL20u6E6XVhncY6Ae6SQSBQqiIkgjPsiG0NDNsDlju/kzBnfimKFC/bpzOrqFqbhswQHifnet5uHlpG97whTzLO3ka0M5aqB9V9mD/0qVXvNgAVVnSTULH254YqpeCcAhmsKiFZSL6OrOZmCp8kZ/OeOUK9iYWYylL7VcOXVrZf10EPrlaCNXzVk7K35dPuQ7svhA0Pgju3kngB4RLa5Iojhw3IT+B5+m8pisjOSd1oKMrRmhGs7rDhF5IEtAiVxqVp7uOOMPQj3vrbMDAzf7vqLtQIDAQAB',
+    action: { default_title: 'Synthetic extension action' },
+    content_scripts: [{ matches: ['http://127.0.0.1/*'], js: ['content.js'] }],
+  }));
+  await writeFile(join(folder, 'content.js'), 'document.documentElement.dataset.extensionLoaded = "true";');
+  await mkdir(join(folder, 'app'));
+  await writeFile(join(folder, 'app/app.html'), '<!doctype html><title>Synthetic welcome</title>');
   const first = await manager.call(caller, 'open_page', { url });
   const record = manager.pages.get(first.page_id);
-  await manager.call(caller, 'evaluate_script', { ...first, expression: 'window.syntheticListener = true' });
-  await record.page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<input aria-label="Synthetic password" type="password">'));
-  const oldSnapshot = await manager.call(caller, 'inspect_page', first);
-  const oldPasswordId = oldSnapshot.match(/uid=(\S+) textbox "Synthetic password"/)[1];
+  await record.page.waitForFunction(() => document.documentElement.dataset.extensionLoaded === 'true', { timeout: 5000 });
   await manager.call(caller, 'show_page', first);
   const ui = await record.engine.page({ targetId: record.entry.uiTargetId });
-  const snapshot = record.page.accessibility.snapshot.bind(record.page.accessibility);
-  record.page.accessibility.snapshot = async options => {
-    const value = await snapshot(options);
-    await ui.evaluate(() => window.doze.act('one-password'));
-    return value;
-  };
-  await assert.rejects(manager.call(caller, 'inspect_page', first), /protection was enabled/);
-  record.page.accessibility.snapshot = snapshot;
-  assert.equal(await manager.call(caller, 'evaluate_script', { ...first, expression: '1' }), 1);
-  await assert.rejects(manager.call(caller, 'click', { ...first, element: oldPasswordId }), /protected|Unknown element/);
-  await manager.call(caller, 'close_page', first);
-  const second = await manager.call(caller, 'open_page', { url });
-  assert.equal(await manager.call(caller, 'evaluate_script', { ...second, expression: '1' }), 1);
-  assert.match(await manager.call(caller, 'inspect_page', second), /textbox "Name"/);
-  const secondRecord = manager.pages.get(second.page_id);
-  await secondRecord.page.evaluate(() => {
-    const input = document.body.appendChild(document.createElement('input'));
-    input.type = 'password'; input.value = 'SYNTHETIC_PROTECTED';
-  });
-  await assert.rejects(manager.call(caller, 'evaluate_script', { ...second, expression: '1' }), /protected password field/);
-  assert.match(await manager.call(caller, 'inspect_page', second), /textbox "Name"/);
+  await ui.waitForFunction(() => {
+    const actions = document.querySelector('#extension-actions');
+    return !actions.hidden && actions.shadowRoot.querySelector('.action')?.title === 'Synthetic extension action';
+  }, { timeout: 5000 });
+  assert.equal(await ui.$('#one-password'), null);
+  assert.equal(await ui.$$eval('#tabs .tab', tabs => tabs.length), 1);
+  await ui.click('pierce/.action');
+  await record.engine.browser.waitForTarget(target => target.url() === `chrome-extension://${extension}/app/app.html#/page/welcome`, { timeout: 5000 });
+  await ui.waitForFunction(() => document.querySelectorAll('#tabs .tab').length === 2, { timeout: 5000 });
+  assert.deepEqual(await manager.call(caller, 'list_pages', {}), [{ page_id: first.page_id, url: url + '/', title: '共同操作' }]);
 });
 
 test('Electron: hidden pages, initial popup prompt, inherited ownership and native screenshot', { skip: !enabled, timeout: 45_000 }, async t => {

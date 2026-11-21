@@ -23,8 +23,9 @@ let browserMenu;
 let onePassword;
 let registeringTab = false;
 let extensionsLoaded;
-let openExtensionTab;
+let extensionActivation;
 let scriptsUsed = false;
+let openExtensionTab;
 const output = message => process.stdout.write(JSON.stringify(message) + '\n');
 const uiURL = pathToFileURL(join(__dirname, 'ui/index.html')).href;
 const toolbarPreload = join(profile, 'doze-toolbar-preload.cjs');
@@ -500,14 +501,10 @@ ipcMain.handle('doze-ui', async (event, action, args = {}) => {
     case 'back': if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': wc.reload(); break;
-    case 'one-password':
-      if (entry?.partition !== 'persist:project') throw new Error('1Password requires a saved project session');
-      try {
-        await onePassword.enable();
-        if (scriptsUsed) throw new Error('このセッションでは任意JavaScriptが実行されています。すべてのページを終了して開き直してから1Passwordを導入してください。');
-        await onePassword.install();
-        await openExtensionTab(view, 'app/app.html#/page/welcome');
-      } catch (error) { await dialog.showMessageBox(view.window, { type: 'error', message: '1Passwordを開けませんでした', detail: error.message }); }
+    case 'one-password-setup':
+      if (entry?.partition === 'persist:project' && onePassword.state.installed) {
+        await onePassword.showSetup(() => openExtensionTab(view, 'app/app.html#/page/welcome'));
+      }
       break;
     case 'one-password-menu':
       if (entry?.partition !== 'persist:project' || !onePassword.state.installed) break;
@@ -587,14 +584,14 @@ app.whenReady().then(async () => {
       switch (message.action) {
         case 'policy': {
           const entry = entries.get(message.page);
-          if (!entry) throw new Error('Page is closed');
+          if (!entry) throw Object.assign(new Error('Page is closed'), { code: 'PAGE_CLOSED' });
           if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
           if (entry.view.annotating && entry.view.active === entry.id && !['get_annotations','resolve_annotation'].includes(message.operation)) throw new Error('The user is adding annotations. Wait until annotation mode is closed.');
-          const enabled = entry.partition === 'persist:project' && onePassword.enabled;
           const evaluating = message.operation === 'evaluate_script';
-          if (!enabled) {
-            if (evaluating) scriptsUsed = true;
-            result = { enabled: false }; break;
+          if (entry.partition !== 'persist:project') { result = { enabled: false }; break; }
+          if (evaluating) {
+            scriptsUsed = true;
+            await extensionActivation?.catch(() => {});
           }
           entry.privacy ||= new PagePrivacy(entry.content.webContents);
           const report = await entry.privacy.report();
@@ -605,7 +602,6 @@ app.whenReady().then(async () => {
             throw new Error('A protected password field received a value during JavaScript execution. The script may have run; no result was returned.');
           }
           if (report.entered && message.operation === 'resolve_annotation') throw privacyError();
-          if (evaluating) scriptsUsed = true;
           if (message.operation === 'take_screenshot' && report.privateFrames) throw privacyError();
           if (message.version !== undefined && message.version !== report.version) throw new Error('The page changed during this operation. No content was returned; inspect the page again.');
           result = { enabled: true, ...report }; break;
@@ -614,7 +610,12 @@ app.whenReady().then(async () => {
           const entry = make(message.page, message.partition, undefined, {}, message.owner);
           await entry.content.webContents.loadURL('about:blank');
           if (message.partition === 'persist:project') {
-            extensionsLoaded ||= onePassword.loadInstalled().catch(error => { onePassword.error = error.message; refresh(); });
+            extensionsLoaded ||= onePassword.loadInstalled(path => {
+              // A download can finish after the page has already run arbitrary JavaScript.
+              if (scriptsUsed) return;
+              extensionActivation = projectSession.extensions.loadExtension(path).then(refresh);
+              return extensionActivation;
+            }).catch(error => { onePassword.error = error.message; refresh(); });
             await extensionsLoaded;
           }
           result = true; break;
@@ -628,7 +629,7 @@ app.whenReady().then(async () => {
           if (!entry) throw new Error('Page is closed');
           if (entry.userOnly || isUserOnlyURL(entry.content.webContents.getURL())) throw privacyError();
           const wc = entry.content.webContents;
-          const privacy = entry.partition === 'persist:project' && onePassword.enabled ? (entry.privacy ||= new PagePrivacy(wc)) : null;
+          const privacy = entry.partition === 'persist:project' ? (entry.privacy ||= new PagePrivacy(wc)) : null;
           const bounds = entry.content.getBounds();
           try {
             entry.content.setBounds({ ...bounds, width: message.width, height: message.height });
@@ -676,7 +677,7 @@ app.whenReady().then(async () => {
         default: throw new Error('Unknown browser command');
       }
       output({ id: message.id, result });
-    } catch (error) { output({ id: message?.id, error: error.message }); }
+    } catch (error) { output({ id: message?.id, error: error.message, code: error.code }); }
   })(); });
 }).catch(() => { output({ event: 'fatal', message: 'Cannot initialize secure browser storage' }); app.exit(1); });
 process.stdin.once('end', () => { quitting = true; app.quit(); });

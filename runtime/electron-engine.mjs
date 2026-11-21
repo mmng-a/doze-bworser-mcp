@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
+import { PageClosed } from './controller.mjs';
 import { isUserOnlyURL } from './privacy.cjs';
 
 /** Carry CDP over inherited pipes; the browser never listens on a TCP port. */
@@ -67,7 +68,8 @@ export class ElectronEngine extends EventEmitter {
         else if (message.id) {
           const task = this.pending.get(message.id);
           this.pending.delete(message.id);
-          if (message.error) task?.reject(new Error(message.error)); else task?.resolve(message.result);
+          if (message.error) task?.reject(message.code === 'PAGE_CLOSED' ? new PageClosed() : new Error(message.error));
+          else task?.resolve(message.result);
         } else this.event(message);
       } catch { fail(new Error('Invalid Electron control response')); }
     });

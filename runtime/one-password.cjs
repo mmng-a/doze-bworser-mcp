@@ -1,9 +1,9 @@
 const { session } = require('electron');
 const { join } = require('node:path');
-const { access, writeFile } = require('node:fs/promises');
 const { existsSync } = require('node:fs');
+const { access, writeFile } = require('node:fs/promises');
 const { ElectronChromeExtensions } = require('electron-chrome-extensions');
-const { installExtension, updateExtensions } = require('electron-chrome-web-store');
+const { downloadExtension, installExtension, updateExtensions } = require('electron-chrome-web-store');
 
 const extensionId = 'aeblfdkhhhdcdjpifhhbdiojplfjncoa';
 
@@ -12,8 +12,9 @@ class OnePassword {
   constructor(browserSession, profile, callbacks, changed) {
     this.session = browserSession;
     this.extensionsPath = join(profile, 'Extensions');
-    this.policyPath = join(profile, 'one-password-enabled');
-    this.enabled = existsSync(this.policyPath) || existsSync(join(this.extensionsPath, extensionId));
+    // Profiles that already used the manual installer have this marker.
+    this.setupPath = join(profile, 'one-password-enabled');
+    this.needsSetup = !existsSync(this.setupPath) || !existsSync(join(this.extensionsPath, extensionId));
     this.changed = changed;
     this.host = new ElectronChromeExtensions({ session: browserSession, ...callbacks });
     ElectronChromeExtensions.handleCRXProtocol(session.defaultSession);
@@ -28,15 +29,31 @@ class OnePassword {
     });
   }
   get state() {
-    return { installed: !!this.session.extensions.getExtension(extensionId), busy: !!this.pending, error: this.error || '' };
+    return { installed: !!this.session.extensions.getExtension(extensionId), needsSetup: this.needsSetup, busy: !!this.pending, error: this.error || '' };
   }
-  async enable() {
-    await writeFile(this.policyPath, '', { mode: 0o600 });
-    this.enabled = true;
+  async showSetup(open) {
+    if (!this.needsSetup) return;
+    this.needsSetup = false;
+    try {
+      await open();
+      await writeFile(this.setupPath, '', { mode: 0o600 });
+    } catch (error) {
+      this.needsSetup = true;
+      throw error;
+    } finally {
+      this.changed();
+    }
   }
-  async loadInstalled() {
+  async loadInstalled(activate) {
     try { await access(join(this.extensionsPath, extensionId)); }
-    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      // A fresh download should not keep the browser from opening offline.
+      void downloadExtension(extensionId, this.extensionsPath)
+        .then(activate)
+        .catch(error => { this.error = error.message; this.changed(); });
+      return;
+    }
     await this.install();
   }
   async install(update = false) {
